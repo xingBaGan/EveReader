@@ -25,9 +25,10 @@ export interface ZLibBook {
   dlDate?: string;
   preview?: string;
   href?: string;
-  readOnlineAvailable: boolean;
+  readOnlineAvailable?: boolean;
   readOnlineUrl?: string;
-  isUserSavedBook: boolean;
+  isUserSavedBook?: boolean;
+  _isUserSavedBook?: boolean;
   kindleAvailable?: boolean;
   isSendToEmailAvailable?: boolean;
   sendToEmailAvailable?: boolean;

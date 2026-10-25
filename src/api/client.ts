@@ -25,14 +25,19 @@ apiClient.interceptors.request.use((config) => {
 
   const user = useAuthStore.getState().user;
   if (user && user.id && user.remix_userkey) {
+    const userIdStr = user.id.toString();
+    const userKeyStr = user.remix_userkey;
+    const cookieStr = `remix_userId=${userIdStr}; remix_userkey=${userKeyStr}`;
+
     if (config.headers && typeof (config.headers as any).set === 'function') {
-      (config.headers as any).set('remix-userid', user.id.toString());
-      (config.headers as any).set('remix-userkey', user.remix_userkey);
-      (config.headers as any).set('Cookie', `remix_userId=${user.id}; remix_userkey=${user.remix_userkey}`);
-    } else if (config.headers) {
-      config.headers['remix-userid'] = user.id.toString();
-      config.headers['remix-userkey'] = user.remix_userkey;
-      config.headers['Cookie'] = `remix_userId=${user.id}; remix_userkey=${user.remix_userkey}`;
+      (config.headers as any).set('remix-userid', userIdStr);
+      (config.headers as any).set('remix-userkey', userKeyStr);
+      (config.headers as any).set('Cookie', cookieStr);
+    }
+    if (config.headers) {
+      config.headers['remix-userid'] = userIdStr;
+      config.headers['remix-userkey'] = userKeyStr;
+      config.headers['Cookie'] = cookieStr;
     }
   }
 

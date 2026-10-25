@@ -82,6 +82,11 @@ export function BookDetailModal() {
   const isDownloading = task?.status === 'downloading';
   const isCompleted = task?.status === 'completed';
 
+  const getIsBookSaved = (book?: ZLibBook | null): boolean => {
+    if (!book) return false;
+    return Boolean((book as any)._isUserSavedBook ?? book.isUserSavedBook);
+  };
+
   // Sync state when rawBook changes
   useEffect(() => {
     if (rawBook) {
@@ -89,7 +94,7 @@ export function BookDetailModal() {
       setDetailData(null);
       setFormats([]);
       setSimilarBooks([]);
-      setIsSaved(!!rawBook.isUserSavedBook);
+      setIsSaved(getIsBookSaved(rawBook));
       setIsDescExpanded(false);
     }
   }, [rawBook]);
@@ -109,9 +114,11 @@ export function BookDetailModal() {
       if (!isMounted) return;
 
       if (detailRes.status === 'fulfilled' && detailRes.value.book) {
-        setDetailData(detailRes.value.book);
-        if (detailRes.value.book.isUserSavedBook !== undefined) {
-          setIsSaved(!!detailRes.value.book.isUserSavedBook);
+        const fetchedBook = detailRes.value.book;
+        setDetailData(fetchedBook);
+        const savedStatus = (fetchedBook as any)._isUserSavedBook ?? fetchedBook.isUserSavedBook;
+        if (savedStatus !== undefined) {
+          setIsSaved(Boolean(savedStatus));
         }
       }
 
@@ -161,9 +168,21 @@ export function BookDetailModal() {
       if (isSaved) {
         await zlibApi.unsaveBook(displayBook.id);
         setIsSaved(false);
+        (displayBook as any)._isUserSavedBook = false;
+        displayBook.isUserSavedBook = false;
+        if (rawBook) {
+          (rawBook as any)._isUserSavedBook = false;
+          rawBook.isUserSavedBook = false;
+        }
       } else {
         await zlibApi.saveBook(displayBook.id);
         setIsSaved(true);
+        (displayBook as any)._isUserSavedBook = true;
+        displayBook.isUserSavedBook = true;
+        if (rawBook) {
+          (rawBook as any)._isUserSavedBook = true;
+          rawBook.isUserSavedBook = true;
+        }
       }
     } catch (err: any) {
       Alert.alert('操作失败', err.response?.data?.error || err.message || '请检查网络连接');
@@ -183,11 +202,6 @@ export function BookDetailModal() {
       // ignore
     }
   };
-
-  const canSendEmail =
-    displayBook.sendToEmailAvailable !== false &&
-    displayBook.isSendToEmailAvailable !== false;
-  const canSendKindle = displayBook.kindleAvailable !== false;
 
   // Push to Email or Kindle
   const handleSendTo = (type: 'email' | 'kindle') => {
@@ -210,7 +224,12 @@ export function BookDetailModal() {
       return;
     }
 
-    if (type === 'email' && !canSendEmail) {
+    // Check size limit: email 25MB, kindle 50MB
+    const fileSize = displayBook.filesize || 0;
+    const isEmailTooLarge = type === 'email' && fileSize > 25 * 1024 * 1024;
+    const isKindleTooLarge = type === 'kindle' && fileSize > 50 * 1024 * 1024;
+
+    if (isEmailTooLarge) {
       Alert.alert(
         '无法发送至邮箱',
         `该书籍文件体积（${displayBook.filesizeString || '过大'}）已超出邮件附件 25MB 的最大限制，官方源站不支持通过邮件推送。请直接点击下方「下载书籍」保存到本地阅读。`
@@ -218,7 +237,7 @@ export function BookDetailModal() {
       return;
     }
 
-    if (type === 'kindle' && !canSendKindle) {
+    if (isKindleTooLarge) {
       Alert.alert(
         '无法发送至 Kindle',
         `该书籍文件体积（${displayBook.filesizeString || '过大'}）已超出亚马逊 Kindle 50MB 的传输上限，官方源站不支持推送到 Kindle。请直接点击下方「下载书籍」保存到本地。`
@@ -253,10 +272,18 @@ export function BookDetailModal() {
                   `已成功将书籍发送至您的 ${typeLabel}（${targetAddress}），请注意查收。`
                 );
               } else {
-                Alert.alert(
-                  '推送失败',
-                  res.error || res.message || '官方服务器拒绝了推送请求，请稍后重试。'
-                );
+                const errorMsg = res.error || res.message;
+                if (errorMsg && errorMsg.includes('5 downloads')) {
+                  Alert.alert(
+                    '今日下载配额已达上限',
+                    '您的账号今日免费下载/推送额度已达上限，额度将在 24 小时后重置。'
+                  );
+                } else {
+                  Alert.alert(
+                    '推送失败',
+                    errorMsg || '官方服务器拒绝了推送请求，请稍后重试或尝试直接点击「下载书籍」。'
+                  );
+                }
               }
             } catch (err: any) {
               const resMsg = err.response?.data?.error || err.response?.data?.message;
@@ -270,6 +297,8 @@ export function BookDetailModal() {
 
   const cleanDescription = stripHtml(displayBook.description);
   const isLongDesc = cleanDescription.length > 180;
+  const canSendEmail = !displayBook.filesize || displayBook.filesize <= 25 * 1024 * 1024;
+  const canSendKindle = !displayBook.filesize || displayBook.filesize <= 50 * 1024 * 1024;
 
   return (
     <Modal

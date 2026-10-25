@@ -76,15 +76,47 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
     }));
 
     try {
-      // 2. Get signed CDN download link
-      const fileData = await zlibApi.getDownloadLink(book.id, book.hash);
-      const allowDownload = fileData.file?.allowDownload !== false;
-      const dlLink = fileData.file?.dlLink;
+      // 2. Resolve download URL:
+      // A. Try official getDownloadLink API first (/eapi/book/{id}/{hash}/file)
+      let directUrl: string | undefined;
+      let resolvedExtension = book.extension;
+      let resolvedFilesizeString = book.filesizeString;
+      let lastErrorMessage = '';
 
-      if (fileData.success === 0 || !allowDownload || !dlLink) {
-        const errorMsg = fileData.error || fileData.message;
+      try {
+        const fileData = await zlibApi.getDownloadLink(book.id, book.hash);
+        if (fileData.success === 1 && fileData.file?.dlLink) {
+          directUrl = fileData.file.dlLink;
+          if (fileData.file.extension) resolvedExtension = fileData.file.extension;
+        } else {
+          lastErrorMessage = fileData.error || fileData.message || '';
+        }
+      } catch (err: any) {
+        lastErrorMessage = err.response?.data?.error || err.message || '';
+      }
+
+      // B. If dlLink was not returned, attempt fallback to book.dl (or fetch detail to get book.dl)
+      if (!directUrl) {
+        if (book.dl) {
+          directUrl = book.dl;
+        } else {
+          try {
+            const detailRes = await zlibApi.getBookDetail(book.id, book.hash);
+            if (detailRes.success === 1 && detailRes.book) {
+              if (detailRes.book.dl) directUrl = detailRes.book.dl;
+              if (detailRes.book.extension) resolvedExtension = detailRes.book.extension;
+              if (detailRes.book.filesizeString) resolvedFilesizeString = detailRes.book.filesizeString;
+            }
+          } catch {
+            // detail fetch fallback ignored
+          }
+        }
+      }
+
+      // C. If still no directUrl, handle errors properly (quota vs login vs not available)
+      if (!directUrl) {
+        const errorMsg = lastErrorMessage;
         const isQuotaReached =
-          !allowDownload ||
           (errorMsg && errorMsg.toLowerCase().includes('limit')) ||
           (errorMsg && errorMsg.toLowerCase().includes('quota')) ||
           (errorMsg && errorMsg.includes('5 downloads'));
@@ -110,10 +142,11 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
           );
         } else {
           Alert.alert(
-            '无法获取下载直链',
+            '无法获取下载链接',
             errorMsg || '官方源站暂未开放该文件的直链下载，请稍后重试或尝试在详情页切换格式。'
           );
         }
+
         set((state) => ({
           tasks: {
             ...state.tasks,
@@ -127,15 +160,45 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
         return undefined;
       }
 
-      // Handle relative download links
-      let directUrl = dlLink;
+      // Normalize relative or cross-domain URLs
       if (directUrl.startsWith('/')) {
         const currentBaseUrl = useDomainStore.getState().currentBaseUrl;
         directUrl = `${currentBaseUrl}${directUrl}`;
+      } else {
+        try {
+          const parsed = new URL(directUrl);
+          const currentBase = useDomainStore.getState().currentBaseUrl;
+          const currentUrlObj = new URL(currentBase);
+          const officialHosts = [
+            'singlelogin.rs',
+            '1lib.sk',
+            'z-library.sk',
+            'zlibrary.se',
+            'zlibrary-global.se',
+            'singlelogin.re',
+          ];
+          if (officialHosts.includes(parsed.hostname) && !officialHosts.includes(currentUrlObj.hostname)) {
+            parsed.protocol = currentUrlObj.protocol;
+            parsed.host = currentUrlObj.host;
+            directUrl = parsed.toString();
+          }
+        } catch {
+          // ignore URL parsing error
+        }
       }
 
       // Web platform fallback: direct download or local blob
       if (Platform.OS === 'web') {
+        if (typeof window !== 'undefined') {
+          const a = document.createElement('a');
+          a.href = directUrl;
+          a.download = `${(book.title || 'book').replace(/[/\\?%*:|"<>]/g, '_').slice(0, 50)}.${resolvedExtension || 'epub'}`;
+          a.target = '_blank';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        }
+
         set((state) => ({
           tasks: {
             ...state.tasks,
@@ -144,6 +207,8 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
               progress: 100,
               status: 'completed',
               localUri: directUrl,
+              extension: resolvedExtension || book.extension,
+              filesizeString: resolvedFilesizeString || book.filesizeString,
             },
           },
         }));
@@ -154,8 +219,8 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
           title: book.title,
           author: book.author,
           cover: book.cover,
-          extension: book.extension,
-          filesizeString: book.filesizeString,
+          extension: resolvedExtension || book.extension,
+          filesizeString: resolvedFilesizeString || book.filesizeString,
           localUri: directUrl,
           source: 'download',
         });
@@ -166,11 +231,42 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
       }
 
       // Native platform (iOS/Android): Download using Expo FileSystem API
-      const sanitizedTitle = book.title.replace(/[/\\?%*:|"<>]/g, '_');
-      const filename = `${sanitizedTitle}_${book.id}.${book.extension}`;
+      const ext = (resolvedExtension || book.extension || 'epub').toLowerCase();
+      const sanitizedTitle = (book.title || 'book').replace(/[/\\?%*:|"<>]/g, '_').slice(0, 50);
+      const filename = `${sanitizedTitle}_${book.id}.${ext}`;
       const destinationFile = new File(Paths.document, filename);
 
-      const downloadedFile = await File.downloadFileAsync(directUrl, destinationFile);
+      const downloadHeaders: Record<string, string> = {
+        'source': 'android',
+        'ANDROID-APP-VERSION': '1.11.4',
+        'appversion': '1.11.4',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
+      };
+      if (user && user.id && user.remix_userkey) {
+        downloadHeaders['remix-userid'] = user.id.toString();
+        downloadHeaders['remix-userkey'] = user.remix_userkey;
+        downloadHeaders['Cookie'] = `remix_userId=${user.id}; remix_userkey=${user.remix_userkey}`;
+      }
+
+      const downloadedFile = await File.downloadFileAsync(directUrl, destinationFile, {
+        idempotent: true,
+        headers: downloadHeaders,
+        onProgress: (p) => {
+          const total = p.totalBytes;
+          const written = p.bytesWritten;
+          const progress = total > 0 ? Math.round((written / total) * 100) : 50;
+          set((state) => ({
+            tasks: {
+              ...state.tasks,
+              [book.id]: {
+                ...state.tasks[book.id],
+                progress,
+              },
+            },
+          }));
+        },
+      });
+
       const localUri = downloadedFile.uri;
 
       set((state) => ({
@@ -181,6 +277,8 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
             progress: 100,
             status: 'completed',
             localUri,
+            extension: resolvedExtension || book.extension,
+            filesizeString: resolvedFilesizeString || book.filesizeString,
           },
         },
       }));
@@ -191,8 +289,8 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
         title: book.title,
         author: book.author,
         cover: book.cover,
-        extension: book.extension,
-        filesizeString: book.filesizeString,
+        extension: resolvedExtension || book.extension,
+        filesizeString: resolvedFilesizeString || book.filesizeString,
         localUri,
         source: 'download',
       });

@@ -308,8 +308,9 @@ ${pdfJsCode}
         overlay.innerHTML = '';
         if (!visible || !bubbles || bubbles.length === 0) return;
 
-        var baseW = 600;
-        var baseH = 800;
+        var cv = document.querySelector('canvas');
+        var cvW = cv ? cv.width : 600;
+        var cvH = cv ? cv.height : 800;
 
         bubbles.forEach(function(b, idx) {
           var box = b.box;
@@ -319,15 +320,34 @@ ${pdfJsCode}
           var typeClass = 'bubble-type-' + (b.textType || 'bubble');
           el.className = 'bubble-box ' + typeClass;
 
-          var leftPct = (box.x / baseW) * 100;
-          var topPct = (box.y / baseH) * 100;
-          var widthPct = (box.width / baseW) * 100;
-          var heightPct = (box.height / baseH) * 100;
+          var leftPct, topPct, widthPct, heightPct;
 
-          el.style.left = Math.max(0, leftPct) + '%';
-          el.style.top = Math.max(0, topPct) + '%';
-          el.style.width = Math.min(100, widthPct) + '%';
-          el.style.height = Math.min(100, heightPct) + '%';
+          if (box.x <= 1.0 && box.y <= 1.0 && box.width <= 1.0 && box.height <= 1.0) {
+            // 归一化比例 (0.0 ~ 1.0)
+            leftPct = box.x * 100;
+            topPct = box.y * 100;
+            widthPct = box.width * 100;
+            heightPct = box.height * 100;
+          } else if (box.x <= 100.0 && box.y <= 100.0 && box.width <= 100.0 && box.height <= 100.0) {
+            // 已是百分比坐标 (0.0% ~ 100.0%)
+            leftPct = box.x;
+            topPct = box.y;
+            widthPct = box.width;
+            heightPct = box.height;
+          } else {
+            // 绝对像素坐标 (> 100)
+            var refW = b.refWidth || cvW || 600;
+            var refH = b.refHeight || cvH || 800;
+            leftPct = (box.x / refW) * 100;
+            topPct = (box.y / refH) * 100;
+            widthPct = (box.width / refW) * 100;
+            heightPct = (box.height / refH) * 100;
+          }
+
+          el.style.left = Math.max(0, Math.min(100, leftPct)) + '%';
+          el.style.top = Math.max(0, Math.min(100, topPct)) + '%';
+          el.style.width = Math.max(0, Math.min(100, widthPct)) + '%';
+          el.style.height = Math.max(0, Math.min(100, heightPct)) + '%';
 
           var badge = document.createElement('span');
           badge.className = 'bubble-badge';
