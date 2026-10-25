@@ -183,9 +183,13 @@ class ScreenTranslatorOverlayModule : Module() {
       CoroutineScope(Dispatchers.IO).launch {
         var bitmap: Bitmap? = null
         try {
-          // 稳健支持 content://, file:// 及本地绝对路径
+          // 稳健支持 base64, content://, file:// 及本地绝对路径
           bitmap = try {
-            if (imageUri.startsWith("content://")) {
+            if (imageUri.startsWith("data:") && imageUri.contains("base64,")) {
+              val base64Data = imageUri.substringAfter("base64,")
+              val decodedBytes = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT)
+              BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.size)
+            } else if (imageUri.startsWith("content://")) {
               context.contentResolver.openInputStream(Uri.parse(imageUri))?.use {
                 BitmapFactory.decodeStream(it)
               }
@@ -241,7 +245,11 @@ class ScreenTranslatorOverlayModule : Module() {
         var bitmap: Bitmap? = null
         try {
           bitmap = try {
-            if (imageUri.startsWith("content://")) {
+            if (imageUri.startsWith("data:") && imageUri.contains("base64,")) {
+              val base64Data = imageUri.substringAfter("base64,")
+              val decodedBytes = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT)
+              BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.size)
+            } else if (imageUri.startsWith("content://")) {
               context.contentResolver.openInputStream(Uri.parse(imageUri))?.use {
                 BitmapFactory.decodeStream(it)
               }
@@ -305,7 +313,11 @@ class ScreenTranslatorOverlayModule : Module() {
         var crop: Bitmap? = null
         try {
           bitmap = try {
-            if (imageUri.startsWith("content://")) {
+            if (imageUri.startsWith("data:") && imageUri.contains("base64,")) {
+              val base64Data = imageUri.substringAfter("base64,")
+              val decodedBytes = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT)
+              BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.size)
+            } else if (imageUri.startsWith("content://")) {
               context.contentResolver.openInputStream(Uri.parse(imageUri))?.use {
                 BitmapFactory.decodeStream(it)
               }

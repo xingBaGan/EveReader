@@ -267,7 +267,7 @@ ${pdfJsCode}
               setTimeout(function() { loader.style.display = 'none'; }, 200);
             }
 
-            // 翻页后如果气泡检测处于开启状态，立即自动请求新页面气泡检测
+            // 翻页后如果气泡检测处于开启状态，立即请求原生深度学习检测器 (RT-DETR-v2 + ML Kit)
             if (isBubbleDetectionActive) {
               requestDetection(canvas);
             }
@@ -284,7 +284,7 @@ ${pdfJsCode}
         var cv = canvasEl || document.querySelector('canvas');
         if (!cv) return;
         try {
-          var snapshot = cv.toDataURL('image/jpeg', 0.85);
+          var snapshot = cv.toDataURL('image/jpeg', 0.90);
           sendToParent({
             type: 'requestBubbleDetection',
             pageNum: currentPageNum,
@@ -525,6 +525,9 @@ ${pdfJsCode}
             } else {
               renderBubbleOverlay([], false);
             }
+          } else if (data.action === 'runBubbleDetection') {
+            isBubbleDetectionActive = true;
+            requestDetection();
           }
         } catch (e) {}
       });

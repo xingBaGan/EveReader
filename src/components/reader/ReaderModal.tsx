@@ -220,17 +220,26 @@ export function ReaderModal() {
         setSearchResults(data.results || []);
         break;
 
+      case 'bubblesDetected':
+        if (Array.isArray(data.bubbles)) {
+          setDetectedBubbles(data.bubbles);
+          setIsDetectingBubbles(false);
+        }
+        break;
+
       case 'requestBubbleDetection': {
         const targetPage = data.pageNum || currentPage || 1;
         setIsDetectingBubbles(true);
         detectBubblesForPage(targetPage, data.snapshot, data.width, data.height)
           .then((bubbles) => {
-            setDetectedBubbles(bubbles);
+            if (bubbles && bubbles.length > 0) {
+              setDetectedBubbles(bubbles);
+              webViewRef.current?.postMessage('setDetectedBubbles', {
+                bubbles,
+                active: true,
+              });
+            }
             setIsDetectingBubbles(false);
-            webViewRef.current?.postMessage('setDetectedBubbles', {
-              bubbles,
-              active: true,
-            });
           })
           .catch((err) => {
             console.warn('[ReaderModal] 气泡检测流程异常:', err);
@@ -276,7 +285,8 @@ export function ReaderModal() {
 
   const handleRefreshBubbleDetect = () => {
     if (isPdf && webViewRef.current) {
-      webViewRef.current.postMessage('toggleBubbleDetection', { active: true });
+      setIsDetectingBubbles(true);
+      webViewRef.current.postMessage('runBubbleDetection');
     }
   };
 

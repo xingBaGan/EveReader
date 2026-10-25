@@ -136,7 +136,7 @@ export const BubbleDetailModal: React.FC<Props> = ({
                 },
               ]}>
               <Text style={[styles.sourceText, { color: isDark ? '#f1f5f9' : '#0f172a' }]}>
-                {bubble.sourceText || '(未检测到文字内容)'}
+                {bubble.sourceText || '气泡已由 Canvas 视觉引擎定位。文字识别提取需原生端侧 Manga-OCR 模块或在线 OCR 接口。'}
               </Text>
             </View>
           </View>
