@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { useReaderStore } from '../../stores/useReaderStore';
+import { useBookshelfStore } from '../../stores/useBookshelfStore';
 import { READER_THEMES } from '../../types/reader';
 import { ReaderTopBar } from './ReaderTopBar';
 import { ReaderBottomBar } from './ReaderBottomBar';
@@ -17,9 +18,9 @@ import { ReaderTocDrawer } from './ReaderTocDrawer';
 import { ReaderBookmarksModal } from './ReaderBookmarksModal';
 import { ReaderSearchModal } from './ReaderSearchModal';
 import { TxtReaderView } from './TxtReaderView';
-import { PdfReaderView } from './PdfReaderView';
 import { ReaderWebView, ReaderWebViewRef } from './ReaderWebView';
 import { READER_BUNDLE_HTML } from './readerTemplate';
+import { PDF_BUNDLE_HTML } from './pdfTemplate';
 import { readBookAsBase64 } from '../../utils/fileStorage';
 import { X } from 'lucide-react-native';
 
@@ -45,7 +46,7 @@ export function ReaderModal() {
   const isTxt = currentBook?.extension.toLowerCase() === 'txt';
   const isPdf = currentBook?.extension.toLowerCase() === 'pdf';
 
-  // Load Book Data
+  // Load Book Data into Base64 for EPUB and PDF
   useEffect(() => {
     if (!isOpen || !currentBook) {
       setBase64Content(null);
@@ -53,8 +54,8 @@ export function ReaderModal() {
       return;
     }
 
-    if (isTxt || isPdf) {
-      // Handled directly by TxtReaderView or PdfReaderView
+    if (isTxt) {
+      // Handled directly by TxtReaderView
       return;
     }
 
@@ -84,13 +85,14 @@ export function ReaderModal() {
     return () => {
       isMounted = false;
     };
-  }, [isOpen, currentBook?.id, currentBook?.localUri, isTxt, isPdf]);
+  }, [isOpen, currentBook?.id, currentBook?.localUri, isTxt]);
 
-  // Handle messages from WebView reader engine
+  // Handle messages from WebView reader engine (EPUB & PDF)
   const handleWebViewMessage = (data: any) => {
     switch (data.type) {
       case 'readerReady':
-        if (base64Content) {
+        // EPUB engine ready
+        if (base64Content && !isPdf) {
           webViewRef.current?.postMessage('initBook', {
             base64Data: base64Content,
             initialCfi: currentCfi,
@@ -98,23 +100,62 @@ export function ReaderModal() {
           });
         }
         break;
+
+      case 'pdfReaderReady':
+        // PDF engine ready
+        if (base64Content && isPdf) {
+          const initialPage = currentBook?.currentLocation
+            ? parseInt(currentBook.currentLocation, 10) || 1
+            : 1;
+          webViewRef.current?.postMessage('initPdf', {
+            base64Data: base64Content,
+            initialPage,
+            theme: settings.theme,
+          });
+        }
+        break;
+
+      case 'coverExtracted':
+        // High-resolution cover extracted from PDF or EPUB!
+        if (data.cover && currentBook) {
+          useBookshelfStore.getState().addOrUpdateBook({
+            id: currentBook.id,
+            title: currentBook.title,
+            cover: data.cover,
+          });
+        }
+        break;
+
       case 'toggleBars':
         toggleBars();
         break;
+
       case 'tocLoaded':
         if (Array.isArray(data.toc)) {
           setToc(data.toc);
         }
         break;
+
       case 'relocated':
-        onRelocated(data.cfi, data.progress);
+        if (isPdf) {
+          onRelocated(
+            String(data.currentPage),
+            data.progress,
+            data.chapterTitle || `第 ${data.currentPage} / ${data.totalPages} 页`
+          );
+        } else {
+          onRelocated(data.cfi, data.progress);
+        }
         break;
+
       case 'searchResults':
         setSearchResults(data.results || []);
         break;
+
       case 'error':
         setError(data.message || '阅读引擎内部错误');
         break;
+
       default:
         break;
     }
@@ -122,10 +163,10 @@ export function ReaderModal() {
 
   // Sync settings changes to WebView
   useEffect(() => {
-    if (!isTxt && !isPdf && webViewRef.current) {
+    if (!isTxt && webViewRef.current) {
       webViewRef.current.postMessage('applySettings', { settings });
     }
-  }, [settings, isTxt, isPdf]);
+  }, [settings, isTxt]);
 
   // Actions passed to UI controls
   const handlePrevChapter = () => {
@@ -141,11 +182,25 @@ export function ReaderModal() {
   };
 
   const handleSelectChapter = (href: string) => {
-    webViewRef.current?.postMessage('goToCfi', { cfi: href });
+    if (isPdf) {
+      const pageNum = parseInt(href, 10);
+      if (!isNaN(pageNum)) {
+        webViewRef.current?.postMessage('goToPage', { pageNum });
+      }
+    } else {
+      webViewRef.current?.postMessage('goToCfi', { cfi: href });
+    }
   };
 
-  const handleSelectBookmarkOrSearch = (cfi: string) => {
-    webViewRef.current?.postMessage('goToCfi', { cfi });
+  const handleSelectBookmarkOrSearch = (location: string) => {
+    if (isPdf) {
+      const pageNum = parseInt(location, 10);
+      if (!isNaN(pageNum)) {
+        webViewRef.current?.postMessage('goToPage', { pageNum });
+      }
+    } else {
+      webViewRef.current?.postMessage('goToCfi', { cfi: location });
+    }
   };
 
   const handleSearch = (query: string) => {
@@ -165,15 +220,15 @@ export function ReaderModal() {
         style={
           settings.theme === 'dark' || settings.theme === 'black' ? 'light' : 'dark'
         }
-        hidden={!isBarsVisible && !isPdf}
+        hidden={!isBarsVisible}
       />
 
       <View style={[styles.container, { backgroundColor: themeConfig.bg }]}>
-        {/* Top Control Bar (Always visible or toggleable on PDF, toggleable on EPUB/TXT) */}
-        {isBarsVisible || isPdf ? <ReaderTopBar /> : null}
+        {/* Top Control Bar */}
+        {isBarsVisible ? <ReaderTopBar /> : null}
 
         {/* Reader Core Canvas */}
-        <View style={[styles.bodyContainer, isPdf && styles.pdfBodySpacing]}>
+        <View style={styles.bodyContainer}>
           {error ? (
             <View style={styles.centerBox}>
               <Text style={[styles.errorText, { color: themeConfig.text }]}>{error}</Text>
@@ -182,29 +237,27 @@ export function ReaderModal() {
                 <Text style={styles.closeErrorBtnText}>返回书架</Text>
               </Pressable>
             </View>
-          ) : isPdf && currentBook.localUri ? (
-            <PdfReaderView uri={currentBook.localUri} onToggleBars={toggleBars} />
           ) : isTxt && currentBook.localUri ? (
             <TxtReaderView uri={currentBook.localUri} onToggleBars={toggleBars} />
           ) : loading || !base64Content ? (
             <View style={styles.centerBox}>
               <ActivityIndicator size="large" color="#0284c7" />
               <Text style={[styles.loadingText, { color: themeConfig.text }]}>
-                正在准备图书《{currentBook.title}》...
+                正在载入《{currentBook.title}》...
               </Text>
             </View>
           ) : (
             <ReaderWebView
               ref={webViewRef}
-              html={READER_BUNDLE_HTML}
+              html={isPdf ? PDF_BUNDLE_HTML : READER_BUNDLE_HTML}
               onMessage={handleWebViewMessage}
               style={styles.webView}
             />
           )}
         </View>
 
-        {/* Bottom Control Bar (for EPUB and TXT) */}
-        {isBarsVisible && !isPdf ? (
+        {/* Bottom Control Bar */}
+        {isBarsVisible ? (
           <ReaderBottomBar
             onPrevChapter={handlePrevChapter}
             onNextChapter={handleNextChapter}
@@ -232,9 +285,6 @@ const styles = StyleSheet.create({
   },
   bodyContainer: {
     flex: 1,
-  },
-  pdfBodySpacing: {
-    paddingTop: 50,
   },
   webView: {
     flex: 1,

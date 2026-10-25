@@ -12,7 +12,7 @@ interface BookshelfState {
   isLoaded: boolean;
 
   loadBookshelf: () => Promise<void>;
-  addOrUpdateBook: (book: Partial<BookshelfItem> & { id: string | number; title: string }) => Promise<void>;
+  addOrUpdateBook: (book: Partial<BookshelfItem> & { id: string | number; title?: string }) => Promise<void>;
   updateProgress: (
     bookId: string | number,
     progress: number,
