@@ -25,6 +25,56 @@ export async function readBookAsBase64(uri: string): Promise<string> {
   });
 }
 
+export async function streamFileToWebView(
+  uri: string,
+  onInit: (totalBytes: number) => void,
+  onChunk: (chunkData: string, isLastChunk: boolean) => void,
+  chunkSize: number = 4 * 1024 * 1024 // 4 MB safe chunk size
+): Promise<void> {
+  if (Platform.OS === 'web') {
+    const response = await fetch(uri);
+    const blob = await response.blob();
+    onInit(blob.size);
+    return new Promise<void>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        const b64 = result.includes(',') ? result.split(',')[1] : result;
+        onChunk(b64, true);
+        resolve();
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  // Native (Android / iOS): Stream in small chunks to prevent JVM OutOfMemoryError
+  const info = await FileSystem.getInfoAsync(uri);
+  if (!info.exists) {
+    throw new Error('未找到文件: ' + uri);
+  }
+
+  const totalBytes = info.size || 0;
+  onInit(totalBytes);
+
+  if (totalBytes <= 0) {
+    throw new Error('文件大小为 0');
+  }
+
+  const totalChunks = Math.ceil(totalBytes / chunkSize);
+  for (let i = 0; i < totalChunks; i++) {
+    const position = i * chunkSize;
+    const length = Math.min(chunkSize, totalBytes - position);
+    const chunkData = await FileSystem.readAsStringAsync(uri, {
+      encoding: FileSystem.EncodingType.Base64,
+      position,
+      length,
+    });
+    const isLast = i === totalChunks - 1;
+    onChunk(chunkData, isLast);
+  }
+}
+
 export async function readBookAsText(uri: string): Promise<string> {
   if (Platform.OS === 'web') {
     const response = await fetch(uri);

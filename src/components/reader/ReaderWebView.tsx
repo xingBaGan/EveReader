@@ -30,7 +30,10 @@ export const ReaderWebView = forwardRef<ReaderWebViewRef, ReaderWebViewProps>(
       <View style={[styles.container, style]}>
         <WebViewComponent
           ref={webViewRef}
-          source={{ html }}
+          source={{
+            html,
+            baseUrl: 'file:///',
+          }}
           onMessage={(event: any) => {
             try {
               const data = JSON.parse(event.nativeEvent.data);
@@ -44,6 +47,7 @@ export const ReaderWebView = forwardRef<ReaderWebViewRef, ReaderWebViewProps>(
           javaScriptEnabled={true}
           domStorageEnabled={true}
           allowFileAccess={true}
+          allowFileAccessFromFileURLs={true}
           allowUniversalAccessFromFileURLs={true}
           originWhitelist={['*']}
           showsHorizontalScrollIndicator={false}

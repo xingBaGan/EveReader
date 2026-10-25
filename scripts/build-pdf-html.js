@@ -103,7 +103,7 @@ ${pdfJsCode}
 <body>
   <div id="loading">
     <div class="spinner"></div>
-    <div id="loading-text">正在解析 PDF 漫画与图书...</div>
+    <div id="loading-text">正在准备解析 PDF...</div>
   </div>
 
   <div id="viewer-container"></div>
@@ -124,7 +124,9 @@ ${pdfJsCode}
       var currentPageNum = 1;
       var totalPages = 0;
       var isRendering = false;
-      var currentTheme = 'dark';
+      var assembledChunks = null;
+      var totalExpectedBytes = 0;
+      var bytesReceived = 0;
 
       var themeBackgrounds = {
         light: '#f1f5f9',
@@ -159,7 +161,6 @@ ${pdfJsCode}
 
         pdfDoc.getPage(currentPageNum).then(function(page) {
           var containerWidth = window.innerWidth || document.documentElement.clientWidth || 360;
-          var containerHeight = window.innerHeight || document.documentElement.clientHeight || 640;
           var unscaledViewport = page.getViewport({ scale: 1.0 });
 
           // Scale to fit screen width snugly
@@ -234,21 +235,18 @@ ${pdfJsCode}
       });
 
       window.PdfReaderApi = {
-        initPdf: function(base64Data, initialPage, theme) {
+        loadFromUint8Array: function(bytes, initialPage, theme) {
           try {
             if (theme && themeBackgrounds[theme]) {
               document.body.style.backgroundColor = themeBackgrounds[theme];
             }
+            document.getElementById('loading-text').innerText = '正在排版页面...';
 
-            document.getElementById('loading-text').innerText = '正在载入 PDF 内容...';
-            var binary = atob(base64Data);
-            var len = binary.length;
-            var bytes = new Uint8Array(len);
-            for (var i = 0; i < len; i++) {
-              bytes[i] = binary.charCodeAt(i);
-            }
-
-            pdfjsLib.getDocument({ data: bytes }).promise.then(function(doc) {
+            pdfjsLib.getDocument({
+              data: bytes,
+              cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/',
+              cMapPacked: true
+            }).promise.then(function(doc) {
               pdfDoc = doc;
               totalPages = doc.numPages;
               currentPageNum = Math.min(totalPages, Math.max(1, initialPage || 1));
@@ -279,10 +277,10 @@ ${pdfJsCode}
 
               renderCurrentPage();
             }).catch(function(err) {
-              sendToParent({ type: 'error', message: 'PDF 解析失败: ' + err.message });
+              sendToParent({ type: 'error', message: 'PDF 解析失败: ' + (err.message || String(err)) });
             });
           } catch (e) {
-            sendToParent({ type: 'error', message: e.message });
+            sendToParent({ type: 'error', message: e.message || String(e) });
           }
         },
 
@@ -326,8 +324,26 @@ ${pdfJsCode}
         try {
           var data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
           if (!data || !data.action) return;
-          if (data.action === 'initPdf') {
-            window.PdfReaderApi.initPdf(data.base64Data, data.initialPage, data.theme);
+
+          if (data.action === 'initPdfStream') {
+            totalExpectedBytes = data.totalBytes;
+            assembledChunks = new Uint8Array(data.totalBytes);
+            bytesReceived = 0;
+            document.getElementById('loading-text').innerText = '正在载入内容 (0%)...';
+          } else if (data.action === 'appendPdfChunk') {
+            var binary = atob(data.chunkData);
+            var len = binary.length;
+            for (var i = 0; i < len; i++) {
+              assembledChunks[bytesReceived + i] = binary.charCodeAt(i);
+            }
+            bytesReceived += len;
+            var pct = Math.min(100, Math.round((bytesReceived / totalExpectedBytes) * 100));
+            document.getElementById('loading-text').innerText = '正在载入内容 (' + pct + '%)...';
+
+            if (data.isLastChunk) {
+              document.getElementById('loading-text').innerText = '正在解析文档与漫画...';
+              window.PdfReaderApi.loadFromUint8Array(assembledChunks, data.initialPage, data.theme);
+            }
           } else if (data.action === 'nextPage') {
             window.PdfReaderApi.nextPage();
           } else if (data.action === 'prevPage') {
@@ -344,7 +360,7 @@ ${pdfJsCode}
 
       // Send ready signal with heartbeat until initialized
       var readyInterval = setInterval(function() {
-        if (pdfDoc) {
+        if (pdfDoc || bytesReceived > 0) {
           clearInterval(readyInterval);
         } else {
           sendToParent({ type: 'pdfReaderReady' });

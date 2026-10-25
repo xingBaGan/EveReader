@@ -21,7 +21,7 @@ import { TxtReaderView } from './TxtReaderView';
 import { ReaderWebView, ReaderWebViewRef } from './ReaderWebView';
 import { READER_BUNDLE_HTML } from './readerTemplate';
 import { PDF_BUNDLE_HTML } from './pdfTemplate';
-import { readBookAsBase64 } from '../../utils/fileStorage';
+import { readBookAsBase64, streamFileToWebView } from '../../utils/fileStorage';
 import { X } from 'lucide-react-native';
 
 export function ReaderModal() {
@@ -38,6 +38,7 @@ export function ReaderModal() {
   const setIsSearching = useReaderStore((s) => s.setIsSearching);
 
   const webViewRef = useRef<ReaderWebViewRef>(null);
+  const isStreamingRef = useRef(false);
   const [base64Content, setBase64Content] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,16 +47,18 @@ export function ReaderModal() {
   const isTxt = currentBook?.extension.toLowerCase() === 'txt';
   const isPdf = currentBook?.extension.toLowerCase() === 'pdf';
 
-  // Load Book Data into Base64 for EPUB and PDF
+  // Load Book Data for EPUB
   useEffect(() => {
+    isStreamingRef.current = false;
     if (!isOpen || !currentBook) {
       setBase64Content(null);
       setError(null);
       return;
     }
 
-    if (isTxt) {
-      // Handled directly by TxtReaderView
+    if (isTxt || isPdf) {
+      // Handled directly by TxtReaderView or streamFileToWebView to avoid Java Heap OOM
+      setLoading(false);
       return;
     }
 
@@ -85,7 +88,7 @@ export function ReaderModal() {
     return () => {
       isMounted = false;
     };
-  }, [isOpen, currentBook?.id, currentBook?.localUri, isTxt]);
+  }, [isOpen, currentBook?.id, currentBook?.localUri, isTxt, isPdf]);
 
   // Handle messages from WebView reader engine (EPUB & PDF)
   const handleWebViewMessage = (data: any) => {
@@ -102,15 +105,32 @@ export function ReaderModal() {
         break;
 
       case 'pdfReaderReady':
-        // PDF engine ready
-        if (base64Content && isPdf) {
+        // PDF engine ready! Stream file in small safe chunks to prevent Android JVM OOM
+        if (currentBook?.localUri && isPdf && !isStreamingRef.current) {
+          isStreamingRef.current = true;
           const initialPage = currentBook?.currentLocation
             ? parseInt(currentBook.currentLocation, 10) || 1
             : 1;
-          webViewRef.current?.postMessage('initPdf', {
-            base64Data: base64Content,
-            initialPage,
-            theme: settings.theme,
+
+          streamFileToWebView(
+            currentBook.localUri,
+            (totalBytes) => {
+              webViewRef.current?.postMessage('initPdfStream', { totalBytes });
+            },
+            (chunkData, isLastChunk) => {
+              webViewRef.current?.postMessage('appendPdfChunk', {
+                chunkData,
+                isLastChunk,
+                initialPage,
+                theme: settings.theme,
+              });
+              if (isLastChunk) {
+                isStreamingRef.current = false;
+              }
+            }
+          ).catch((err: any) => {
+            isStreamingRef.current = false;
+            setError('读取文档失败: ' + (err.message || String(err)));
           });
         }
         break;
@@ -239,7 +259,7 @@ export function ReaderModal() {
             </View>
           ) : isTxt && currentBook.localUri ? (
             <TxtReaderView uri={currentBook.localUri} onToggleBars={toggleBars} />
-          ) : loading || !base64Content ? (
+          ) : !isPdf && (loading || !base64Content) ? (
             <View style={styles.centerBox}>
               <ActivityIndicator size="large" color="#0284c7" />
               <Text style={[styles.loadingText, { color: themeConfig.text }]}>
