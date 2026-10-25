@@ -11,7 +11,7 @@ const SAMPLE_PAGE_BUBBLES: Record<number, TextBubble[]> = {
   6: [
     {
       id: 'p6_b1',
-      box: { x: 74.0, y: 5.5, width: 12.0, height: 8.5 },
+      box: { x: 79.01, y: 2.97, width: 10.84, height: 8.25 },
       direction: 'vertical',
       textType: 'sfx',
       readingOrderIndex: 1,
@@ -24,7 +24,7 @@ const SAMPLE_PAGE_BUBBLES: Record<number, TextBubble[]> = {
     },
     {
       id: 'p6_b2',
-      box: { x: 71.5, y: 13.5, width: 12.0, height: 17.5 },
+      box: { x: 69.98, y: 9.90, width: 11.96, height: 19.64 },
       direction: 'vertical',
       textType: 'bubble',
       readingOrderIndex: 2,
@@ -37,7 +37,7 @@ const SAMPLE_PAGE_BUBBLES: Record<number, TextBubble[]> = {
     },
     {
       id: 'p6_b3',
-      box: { x: 50.5, y: 6.5, width: 12.5, height: 20.5 },
+      box: { x: 55.98, y: 3.30, width: 9.26, height: 16.50 },
       direction: 'vertical',
       textType: 'bubble',
       readingOrderIndex: 3,
@@ -50,7 +50,7 @@ const SAMPLE_PAGE_BUBBLES: Record<number, TextBubble[]> = {
     },
     {
       id: 'p6_b4',
-      box: { x: 19.5, y: 10.0, width: 12.5, height: 24.5 },
+      box: { x: 15.80, y: 8.25, width: 19.64, height: 31.52 },
       direction: 'vertical',
       textType: 'bubble',
       readingOrderIndex: 4,
@@ -63,7 +63,7 @@ const SAMPLE_PAGE_BUBBLES: Record<number, TextBubble[]> = {
     },
     {
       id: 'p6_b5',
-      box: { x: 3.0, y: 2.8, width: 29.0, height: 8.5 },
+      box: { x: 1.13, y: 1.32, width: 31.60, height: 7.92 },
       direction: 'horizontal',
       textType: 'free_text',
       readingOrderIndex: 5,
@@ -76,7 +76,7 @@ const SAMPLE_PAGE_BUBBLES: Record<number, TextBubble[]> = {
     },
     {
       id: 'p6_b6',
-      box: { x: 60.5, y: 36.5, width: 21.0, height: 10.5 },
+      box: { x: 64.33, y: 37.95, width: 21.44, height: 10.73 },
       direction: 'horizontal',
       textType: 'sfx',
       readingOrderIndex: 6,
@@ -89,7 +89,7 @@ const SAMPLE_PAGE_BUBBLES: Record<number, TextBubble[]> = {
     },
     {
       id: 'p6_b7',
-      box: { x: 33.0, y: 46.0, width: 53.0, height: 15.5 },
+      box: { x: 31.60, y: 51.16, width: 55.30, height: 12.38 },
       direction: 'horizontal',
       textType: 'title',
       readingOrderIndex: 7,
@@ -103,7 +103,7 @@ const SAMPLE_PAGE_BUBBLES: Record<number, TextBubble[]> = {
     },
     {
       id: 'p6_b8',
-      box: { x: 49.5, y: 56.0, width: 13.5, height: 5.5 },
+      box: { x: 51.92, y: 61.88, width: 10.84, height: 6.27 },
       direction: 'vertical',
       textType: 'free_text',
       readingOrderIndex: 8,
@@ -116,7 +116,7 @@ const SAMPLE_PAGE_BUBBLES: Record<number, TextBubble[]> = {
     },
     {
       id: 'p6_b9',
-      box: { x: 2.5, y: 49.5, width: 11.5, height: 10.5 },
+      box: { x: 2.26, y: 52.81, width: 10.38, height: 8.58 },
       direction: 'vertical',
       textType: 'bubble',
       readingOrderIndex: 9,
@@ -129,7 +129,7 @@ const SAMPLE_PAGE_BUBBLES: Record<number, TextBubble[]> = {
     },
     {
       id: 'p6_b10',
-      box: { x: 60.5, y: 60.5, width: 14.0, height: 15.5 },
+      box: { x: 65.46, y: 70.96, width: 16.70, height: 22.94 },
       direction: 'vertical',
       textType: 'bubble',
       readingOrderIndex: 10,
@@ -142,7 +142,7 @@ const SAMPLE_PAGE_BUBBLES: Record<number, TextBubble[]> = {
     },
     {
       id: 'p6_b11',
-      box: { x: 43.5, y: 61.0, width: 11.5, height: 16.0 },
+      box: { x: 47.40, y: 74.09, width: 14.45, height: 19.80 },
       direction: 'vertical',
       textType: 'bubble',
       readingOrderIndex: 11,
@@ -155,7 +155,7 @@ const SAMPLE_PAGE_BUBBLES: Record<number, TextBubble[]> = {
     },
     {
       id: 'p6_b12',
-      box: { x: 8.5, y: 62.5, width: 12.0, height: 14.5 },
+      box: { x: 5.64, y: 70.96, width: 16.03, height: 19.14 },
       direction: 'vertical',
       textType: 'bubble',
       readingOrderIndex: 12,
@@ -198,7 +198,7 @@ export async function detectBubblesForPage(
 
           return {
             id: `bubble_p${pageNum}_${index}_${Date.now()}`,
-            // 归一化为百分比坐标 (0.0% ~ 100.0%)
+            // 归一化为纯百分比坐标 (0.0% ~ 100.0%)
             box: {
               x: (rawX / imgW) * 100,
               y: (rawY / imgH) * 100,
@@ -282,7 +282,7 @@ function generateHeuristicBubbles(pageNum: number): TextBubble[] {
       box: { x: 58.0, y: 68.0, width: 32.0, height: 14.0 },
       direction: 'vertical',
       readingOrderIndex: 4,
-      sourceText: '信じてるぞ…お前的言葉を！',
+      sourceText: '信じてるぞ…お前の言葉を！',
       targetText: '我相信你…相信你的话！',
       detectedBgColor: '#FFFFFF',
       detectedTextColor: '#18181B',
