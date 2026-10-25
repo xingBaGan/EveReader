@@ -20,6 +20,8 @@ interface ReaderStoreState {
   currentCfi: string;
   currentProgress: number;
   currentChapterTitle: string;
+  currentPage: number;
+  totalPages: number;
   bookmarks: BookmarkItem[];
   searchResults: SearchMatchItem[];
   isSearching: boolean;
@@ -44,7 +46,14 @@ interface ReaderStoreState {
   setIsBookmarksOpen: (open: boolean) => void;
 
   setToc: (toc: TocItem[]) => void;
-  onRelocated: (cfi: string, progress: number, chapterTitle?: string) => void;
+  setPageInfo: (currentPage: number, totalPages: number) => void;
+  onRelocated: (
+    cfi: string,
+    progress: number,
+    chapterTitle?: string,
+    currentPage?: number,
+    totalPages?: number
+  ) => void;
   addBookmark: (excerpt?: string) => Promise<void>;
   removeBookmark: (id: string) => Promise<void>;
   setSearchResults: (results: SearchMatchItem[]) => void;
@@ -67,6 +76,8 @@ export const useReaderStore = create<ReaderStoreState>((set, get) => ({
   currentCfi: '',
   currentProgress: 0,
   currentChapterTitle: '',
+  currentPage: 1,
+  totalPages: 1,
   bookmarks: [],
   searchResults: [],
   isSearching: false,
@@ -93,12 +104,15 @@ export const useReaderStore = create<ReaderStoreState>((set, get) => ({
   },
 
   openReader: (book) => {
+    const parsedPage = book.currentLocation ? parseInt(book.currentLocation, 10) : 1;
     set({
       isOpen: true,
       currentBook: book,
       currentCfi: book.currentLocation || '',
       currentProgress: book.progress || 0,
       currentChapterTitle: book.currentChapter || '',
+      currentPage: !isNaN(parsedPage) && parsedPage > 0 ? parsedPage : 1,
+      totalPages: 1,
       isBarsVisible: false,
       isTocOpen: false,
       isSettingsOpen: false,
@@ -149,14 +163,19 @@ export const useReaderStore = create<ReaderStoreState>((set, get) => ({
   setIsBookmarksOpen: (open) => set({ isBookmarksOpen: open, isBarsVisible: false }),
 
   setToc: (toc) => set({ toc }),
+  setPageInfo: (currentPage, totalPages) => set({ currentPage, totalPages }),
 
-  onRelocated: (cfi, progress, chapterTitle) => {
+  onRelocated: (cfi, progress, chapterTitle, currentPage, totalPages) => {
     const book = get().currentBook;
     const title = chapterTitle || get().currentChapterTitle;
+    const curPage = currentPage !== undefined ? currentPage : get().currentPage;
+    const totPages = totalPages !== undefined ? totalPages : get().totalPages;
     set({
       currentCfi: cfi,
       currentProgress: Math.round(progress * 10) / 10,
       currentChapterTitle: title,
+      currentPage: curPage,
+      totalPages: totPages,
     });
 
     if (book) {

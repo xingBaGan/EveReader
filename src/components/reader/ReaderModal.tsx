@@ -6,13 +6,16 @@ import {
   ActivityIndicator,
   Text,
   Pressable,
+  Platform,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import { NavigationBar, setVisibilityAsync } from 'expo-navigation-bar';
 import { useReaderStore } from '../../stores/useReaderStore';
 import { useBookshelfStore } from '../../stores/useBookshelfStore';
 import { READER_THEMES } from '../../types/reader';
 import { ReaderTopBar } from './ReaderTopBar';
 import { ReaderBottomBar } from './ReaderBottomBar';
+import { ReaderFooterBar } from './ReaderFooterBar';
 import { ReaderSettingsModal } from './ReaderSettingsModal';
 import { ReaderTocDrawer } from './ReaderTocDrawer';
 import { ReaderBookmarksModal } from './ReaderBookmarksModal';
@@ -46,6 +49,18 @@ export function ReaderModal() {
   const themeConfig = READER_THEMES[settings.theme] || READER_THEMES.light;
   const isTxt = currentBook?.extension.toLowerCase() === 'txt';
   const isPdf = currentBook?.extension.toLowerCase() === 'pdf';
+
+  // Manage Android native navigation bar visibility (Collapse in reading mode)
+  useEffect(() => {
+    if (Platform.OS === 'android') {
+      setVisibilityAsync(!isBarsVisible ? 'hidden' : 'visible').catch(() => {});
+    }
+    return () => {
+      if (Platform.OS === 'android') {
+        setVisibilityAsync('visible').catch(() => {});
+      }
+    };
+  }, [isOpen, isBarsVisible]);
 
   // Load Book Data for EPUB
   useEffect(() => {
@@ -156,15 +171,38 @@ export function ReaderModal() {
         }
         break;
 
+      case 'pdfLoaded':
+        if (data.totalPages) {
+          useReaderStore.getState().setPageInfo(data.currentPage || 1, data.totalPages);
+        }
+        break;
+
+      case 'locationsReady':
+        if (data.totalLocations) {
+          useReaderStore.getState().setPageInfo(
+            useReaderStore.getState().currentPage,
+            data.totalLocations
+          );
+        }
+        break;
+
       case 'relocated':
         if (isPdf) {
           onRelocated(
             String(data.currentPage),
             data.progress,
-            data.chapterTitle || `第 ${data.currentPage} / ${data.totalPages} 页`
+            data.chapterTitle || `第 ${data.currentPage} / ${data.totalPages} 页`,
+            data.currentPage,
+            data.totalPages
           );
         } else {
-          onRelocated(data.cfi, data.progress);
+          onRelocated(
+            data.cfi,
+            data.progress,
+            data.chapterTitle,
+            data.currentPage,
+            data.totalPages
+          );
         }
         break;
 
@@ -235,7 +273,9 @@ export function ReaderModal() {
       visible={isOpen}
       animationType="slide"
       statusBarTranslucent
+      navigationBarTranslucent
       onRequestClose={closeReader}>
+      {Platform.OS === 'android' && <NavigationBar hidden={!isBarsVisible} />}
       <StatusBar
         style={
           settings.theme === 'dark' || settings.theme === 'black' ? 'light' : 'dark'
@@ -275,6 +315,9 @@ export function ReaderModal() {
             />
           )}
         </View>
+
+        {/* Subtle Footer: Battery & Time on Left, Page Count on Right (NeatReader Style) */}
+        {!isBarsVisible && !error ? <ReaderFooterBar /> : null}
 
         {/* Bottom Control Bar */}
         {isBarsVisible ? (

@@ -5,6 +5,7 @@ import { Download, BookOpen, Check } from 'lucide-react-native';
 
 import { ZLibBook } from '../types/zlib';
 import { useDownloadStore } from '../stores/useDownloadStore';
+import { useBookDetailStore } from '../stores/useBookDetailStore';
 import { useTheme } from '../hooks/use-theme';
 import { Elevation, Shape, Spacing, Typography } from '../constants/theme';
 import { Button } from './ui/button';
@@ -37,10 +38,8 @@ export function BookCard({ book, onPress, variant = 'elevated' }: BookCardProps)
   const handleCardPress = () => {
     if (onPress) {
       onPress();
-    } else if (isCompleted) {
-      openBookInReader(book.id);
     } else {
-      startDownload(book);
+      useBookDetailStore.getState().openBookDetail(book);
     }
   };
 

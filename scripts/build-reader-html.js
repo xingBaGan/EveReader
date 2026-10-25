@@ -125,7 +125,7 @@ ${epubjsCode}
             'font-family': fontFamilyVal + ' !important',
             'font-size': settings.fontSize + 'px !important',
             'line-height': settings.lineHeight + ' !important',
-            'padding': (settings.flow === 'scrolled' ? '12px 18px 48px' : '0 16px') + ' !important',
+            'padding': (settings.flow === 'scrolled' ? '12px 18px 56px' : '8px 16px 28px') + ' !important',
             'margin': '0 !important'
           },
           'p': {
@@ -220,13 +220,19 @@ ${epubjsCode}
             rendition.on('relocated', function(location) {
               var cfi = location.start.cfi;
               var progress = 0;
+              var currentPage = 1;
+              var totalPages = 1;
               if (book.locations && book.locations.length() > 0) {
                 progress = book.locations.percentageFromCfi(cfi) * 100;
+                currentPage = book.locations.locationFromCfi(cfi) || 1;
+                totalPages = book.locations.total || book.locations.length() || 1;
               }
               sendToParent({
                 type: 'relocated',
                 cfi: cfi,
                 progress: Math.min(100, Math.max(0, progress)),
+                currentPage: currentPage,
+                totalPages: totalPages,
                 atStart: location.atStart,
                 atEnd: location.atEnd
               });

@@ -10,22 +10,25 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useQuery } from '@tanstack/react-query';
+import { useRouter } from 'expo-router';
 import { zlibApi } from '../api/endpoints';
 import { BookCard } from '../components/BookCard';
 import { useDomainStore } from '../stores/useDomainStore';
 import { useAuthStore } from '../stores/useAuthStore';
-import { Globe, Sparkles, Clock, RefreshCw } from 'lucide-react-native';
+import { Globe, Flame, Sparkles, RefreshCw, LogIn } from 'lucide-react-native';
 
 export default function HomeScreen() {
-  const [tab, setTab] = useState<'popular' | 'recent'>('popular');
+  const router = useRouter();
+  const [tab, setTab] = useState<'popular' | 'recommended'>('popular');
   const currentBaseUrl = useDomainStore((s) => s.currentBaseUrl);
   const isProbing = useDomainStore((s) => s.isProbing);
   const probeFastestDomain = useDomainStore((s) => s.probeFastestDomain);
   const user = useAuthStore((s) => s.user);
 
   const { data, isLoading, isError, error, refetch, isRefetching } = useQuery({
-    queryKey: ['books', tab, currentBaseUrl],
-    queryFn: () => (tab === 'popular' ? zlibApi.getMostPopular(1) : zlibApi.getRecentlyAdded(1)),
+    queryKey: ['books', tab, currentBaseUrl, user?.id],
+    queryFn: () => (tab === 'popular' ? zlibApi.getMostPopular(1) : zlibApi.getRecommendations()),
+    enabled: tab === 'popular' || !!user,
     staleTime: 1000 * 60 * 3,
   });
 
@@ -59,27 +62,41 @@ export default function HomeScreen() {
         <Pressable
           style={[styles.segmentBtn, tab === 'popular' && styles.segmentBtnActive]}
           onPress={() => setTab('popular')}>
-          <Sparkles size={14} color={tab === 'popular' ? '#fff' : '#94a3b8'} />
+          <Flame size={14} color={tab === 'popular' ? '#fff' : '#94a3b8'} />
           <Text style={[styles.segmentText, tab === 'popular' && styles.segmentTextActive]}>
-            热门借阅
+            最受欢迎
           </Text>
         </Pressable>
 
         <Pressable
-          style={[styles.segmentBtn, tab === 'recent' && styles.segmentBtnActive]}
-          onPress={() => setTab('recent')}>
-          <Clock size={14} color={tab === 'recent' ? '#fff' : '#94a3b8'} />
-          <Text style={[styles.segmentText, tab === 'recent' && styles.segmentTextActive]}>
-            最新上架
+          style={[styles.segmentBtn, tab === 'recommended' && styles.segmentBtnActive]}
+          onPress={() => setTab('recommended')}>
+          <Sparkles size={14} color={tab === 'recommended' ? '#fff' : '#94a3b8'} />
+          <Text style={[styles.segmentText, tab === 'recommended' && styles.segmentTextActive]}>
+            为你推荐
           </Text>
         </Pressable>
       </View>
 
-      {/* Book List */}
-      {isLoading ? (
+      {/* Book List / Not Logged In State for Recommendations */}
+      {tab === 'recommended' && !user ? (
+        <View style={styles.centerBox}>
+          <Sparkles size={48} color="#334155" />
+          <Text style={styles.emptyTitle}>登录后开启专属推荐</Text>
+          <Text style={styles.emptySubtitle}>
+            Z-Library 会根据你的借阅历史、搜索偏好与云端收藏，智能生成个性化推荐书单。
+          </Text>
+          <Pressable style={styles.loginActionBtn} onPress={() => router.push('/profile')}>
+            <LogIn size={16} color="#fff" />
+            <Text style={styles.loginActionBtnText}>前往登录账号</Text>
+          </Pressable>
+        </View>
+      ) : isLoading ? (
         <View style={styles.centerBox}>
           <ActivityIndicator size="large" color="#38bdf8" />
-          <Text style={styles.loadingText}>正在从镜像获取书单...</Text>
+          <Text style={styles.loadingText}>
+            {tab === 'popular' ? '正在拉取最受欢迎书籍...' : '正在同步个性化推荐书单...'}
+          </Text>
         </View>
       ) : isError ? (
         <View style={styles.centerBox}>
@@ -107,7 +124,9 @@ export default function HomeScreen() {
           }
           ListEmptyComponent={
             <View style={styles.centerBox}>
-              <Text style={styles.emptyText}>暂无书籍记录</Text>
+              <Text style={styles.emptyText}>
+                {tab === 'recommended' ? '暂无专属推荐，先多浏览收藏几本书吧' : '暂无书籍记录'}
+              </Text>
             </View>
           }
         />
@@ -190,6 +209,34 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
+  },
+  emptyTitle: {
+    color: '#e2e8f0',
+    fontSize: 16,
+    fontWeight: '700',
+    marginTop: 14,
+  },
+  emptySubtitle: {
+    color: '#64748b',
+    fontSize: 13,
+    marginTop: 6,
+    lineHeight: 18,
+    textAlign: 'center',
+  },
+  loginActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#0284c7',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+    marginTop: 18,
+  },
+  loginActionBtnText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
   },
   loadingText: {
     color: '#94a3b8',

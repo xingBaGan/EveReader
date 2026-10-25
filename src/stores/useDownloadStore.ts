@@ -2,8 +2,10 @@ import { create } from 'zustand';
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { Platform, Alert } from 'react-native';
+import { router } from 'expo-router';
 import { zlibApi } from '../api/endpoints';
 import { ZLibBook } from '../types/zlib';
+import { useAuthStore } from './useAuthStore';
 import { useBookshelfStore } from './useBookshelfStore';
 import { useReaderStore } from './useReaderStore';
 
@@ -31,6 +33,25 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
   tasks: {},
 
   startDownload: async (book: ZLibBook) => {
+    // 1. Pre-download authentication guard (Z-Lib requires logged in user quota)
+    const user = useAuthStore.getState().user;
+    if (!user) {
+      Alert.alert(
+        '需要登录 Z-Library 账号',
+        '下载电子书需要消耗账号每日免费下载额度（普通用户每天 10 本），请先登录您的 Z-Library 账号。',
+        [
+          { text: '稍后再说', style: 'cancel' },
+          {
+            text: '前往登录',
+            onPress: () => {
+              router.push('/profile');
+            },
+          },
+        ]
+      );
+      return undefined;
+    }
+
     const existing = get().tasks[book.id];
     if (existing && existing.status === 'completed' && existing.localUri) {
       get().openBookInReader(book.id);
@@ -54,12 +75,41 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
     }));
 
     try {
-      // 1. Get signed CDN download link
+      // 2. Get signed CDN download link
       const fileData = await zlibApi.getDownloadLink(book.id, book.hash);
-      const dlLink = fileData.file?.dlLink;
-      if (!dlLink) {
-        throw new Error('未获取到有效下载链接');
+      if (fileData.success === 0 || !fileData.file?.dlLink) {
+        const errorMsg = fileData.error || '未获取到有效下载链接';
+        if (errorMsg.toLowerCase().includes('limit')) {
+          Alert.alert(
+            '今日下载额度已用完',
+            '您今日的免费下载额度已达到上限（普通用户每日限额 10 本）。额度将在 24 小时后重置，或可通过赞助 Z-Library 提高额度。'
+          );
+        } else if (errorMsg.toLowerCase().includes('login')) {
+          Alert.alert(
+            '登录凭证已失效',
+            '您的登录令牌已过期或失效，请重新登录账号。',
+            [
+              { text: '稍后再说', style: 'cancel' },
+              { text: '前往登录', onPress: () => router.push('/profile') },
+            ]
+          );
+        } else {
+          Alert.alert('下载失败', errorMsg);
+        }
+        set((state) => ({
+          tasks: {
+            ...state.tasks,
+            [book.id]: {
+              ...state.tasks[book.id],
+              status: 'failed',
+              error: errorMsg,
+            },
+          },
+        }));
+        return undefined;
       }
+
+      const dlLink = fileData.file.dlLink;
 
       // Web platform fallback: direct download or local blob
       if (Platform.OS === 'web') {
@@ -130,12 +180,32 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
       return localUri;
     } catch (err: any) {
       console.error('Download error:', err);
-      const msg = err.response?.data?.error || err.message || '下载失败';
+      const resError = err.response?.data?.error;
+      const status = err.response?.status;
+      const msg = resError || err.message || '下载失败';
+
       if (
-        err.response?.status === 403 ||
+        status === 403 ||
         (typeof msg === 'string' && msg.toLowerCase().includes('login'))
       ) {
-        Alert.alert('需要登录', '下载书籍需要登录 Z-Library 账号，请在「我的」页面登录后重试。');
+        Alert.alert(
+          '需要登录 Z-Library 账号',
+          '下载书籍需要登录 Z-Library 账号以消耗每日额度，请先登录账号。',
+          [
+            { text: '稍后再说', style: 'cancel' },
+            { text: '前往登录', onPress: () => router.push('/profile') },
+          ]
+        );
+      } else if (status === 502) {
+        Alert.alert(
+          '代理节点未就绪',
+          '当前代理节点未连接到官方源站，请确保已在 Cloudflare Worker 中放行状态码（status < 500），或在「我的」页面切换备用镜像节点。'
+        );
+      } else if (typeof msg === 'string' && msg.toLowerCase().includes('limit')) {
+        Alert.alert(
+          '今日下载额度已用完',
+          '您今日的免费下载额度已达到上限（普通用户每日限额 10 本）。额度将在 24 小时后重置。'
+        );
       } else {
         Alert.alert('下载失败', String(msg));
       }

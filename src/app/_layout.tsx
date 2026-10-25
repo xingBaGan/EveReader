@@ -7,6 +7,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import AppTabs from '@/components/app-tabs';
 import { ReaderModal } from '@/components/reader/ReaderModal';
+import { BookDetailModal } from '@/components/book-detail/BookDetailModal';
 import { useAuthStore } from '@/stores/useAuthStore';
 import { useDomainStore } from '@/stores/useDomainStore';
 import { useReaderStore } from '@/stores/useReaderStore';
@@ -41,6 +42,7 @@ export default function RootLayout() {
         <AnimatedSplashOverlay />
         <AppTabs />
         <ReaderModal />
+        <BookDetailModal />
       </ThemeProvider>
     </QueryClientProvider>
   );

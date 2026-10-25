@@ -120,7 +120,13 @@ export function TxtReaderView({ uri, onToggleBars }: TxtReaderViewProps) {
   useEffect(() => {
     if (chapters.length > 0 && activeChapter) {
       const progress = ((currentChapterIndex + 1) / chapters.length) * 100;
-      onRelocated(activeChapter.id, progress, activeChapter.title);
+      onRelocated(
+        activeChapter.id,
+        progress,
+        activeChapter.title,
+        currentChapterIndex + 1,
+        chapters.length
+      );
     }
   }, [currentChapterIndex, chapters.length]);
 

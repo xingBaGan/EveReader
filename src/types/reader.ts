@@ -8,6 +8,7 @@ export interface ReaderThemeConfig {
   barBg: string;
   barBorder: string;
   barText: string;
+  footerText: string;
 }
 
 export const READER_THEMES: Record<ReaderThemeId, ReaderThemeConfig> = {
@@ -19,6 +20,7 @@ export const READER_THEMES: Record<ReaderThemeId, ReaderThemeConfig> = {
     barBg: '#f8fafc',
     barBorder: '#e2e8f0',
     barText: '#0f172a',
+    footerText: '#94a3b8',
   },
   sepia: {
     id: 'sepia',
@@ -28,6 +30,7 @@ export const READER_THEMES: Record<ReaderThemeId, ReaderThemeConfig> = {
     barBg: '#ede5d4',
     barBorder: '#dcd2bd',
     barText: '#2e2316',
+    footerText: '#8c8273',
   },
   mint: {
     id: 'mint',
@@ -37,6 +40,7 @@ export const READER_THEMES: Record<ReaderThemeId, ReaderThemeConfig> = {
     barBg: '#d3e4d0',
     barBorder: '#c0d4bd',
     barText: '#152612',
+    footerText: '#6b7d68',
   },
   dark: {
     id: 'dark',
@@ -46,6 +50,7 @@ export const READER_THEMES: Record<ReaderThemeId, ReaderThemeConfig> = {
     barBg: '#242526',
     barBorder: '#3a3b3c',
     barText: '#f1f5f9',
+    footerText: '#64748b',
   },
   black: {
     id: 'black',
@@ -55,6 +60,7 @@ export const READER_THEMES: Record<ReaderThemeId, ReaderThemeConfig> = {
     barBg: '#121212',
     barBorder: '#27272a',
     barText: '#ffffff',
+    footerText: '#52525b',
   },
 };
 

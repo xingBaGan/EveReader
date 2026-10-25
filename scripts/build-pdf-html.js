@@ -78,23 +78,6 @@ const clientHtml = `<!DOCTYPE html>
       max-width: 100%;
       height: auto;
     }
-    #page-indicator {
-      position: fixed;
-      bottom: 16px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(15, 23, 42, 0.88);
-      color: #f8fafc;
-      padding: 5px 14px;
-      border-radius: 16px;
-      font-size: 12px;
-      font-weight: 700;
-      backdrop-filter: blur(8px);
-      pointer-events: none;
-      z-index: 40;
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-    }
   </style>
   <script>
 ${pdfJsCode}
@@ -107,7 +90,6 @@ ${pdfJsCode}
   </div>
 
   <div id="viewer-container"></div>
-  <div id="page-indicator">...</div>
 
   <script>
     (function() {
@@ -142,13 +124,6 @@ ${pdfJsCode}
           window.ReactNativeWebView.postMessage(str);
         } else if (window.parent && window.parent !== window) {
           window.parent.postMessage(str, '*');
-        }
-      }
-
-      function updatePageIndicator() {
-        var ind = document.getElementById('page-indicator');
-        if (ind && totalPages > 0) {
-          ind.innerText = currentPageNum + ' / ' + totalPages;
         }
       }
 
@@ -190,7 +165,6 @@ ${pdfJsCode}
 
           page.render(renderContext).promise.then(function() {
             isRendering = false;
-            updatePageIndicator();
 
             var progress = (currentPageNum / totalPages) * 100;
             sendToParent({

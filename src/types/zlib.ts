@@ -50,7 +50,8 @@ export interface ZLibBooksListing {
 
 export interface ZLibBookSingle {
   success: number;
-  book: ZLibBook;
+  book?: ZLibBook;
+  error?: string;
 }
 
 export interface ZLibFile {
@@ -63,7 +64,8 @@ export interface ZLibFile {
 
 export interface ZLibFileListing {
   success: number;
-  file: ZLibFile;
+  file?: ZLibFile;
+  error?: string;
 }
 
 export interface ZLibFormat {
@@ -76,7 +78,9 @@ export interface ZLibFormat {
 
 export interface ZLibBookFormats {
   success: number;
-  formats: ZLibFormat[];
+  formats?: ZLibFormat[];
+  books?: ZLibBook[];
+  error?: string;
 }
 
 export interface ZLibUser {

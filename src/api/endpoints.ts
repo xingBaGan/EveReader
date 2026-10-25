@@ -156,6 +156,28 @@ export const zlibApi = {
   },
 
   /**
+   * Fetch similar recommended books
+   */
+  async getSimilarBooks(id: number, hash: string): Promise<ZLibBooksListing> {
+    const response = await apiClient.get<ZLibBooksListing>(`/eapi/book/${id}/${hash}/similar`);
+    return response.data;
+  },
+
+  /**
+   * Send book to email or Kindle
+   */
+  async sendBookTo(
+    id: number,
+    hash: string,
+    type: 'email' | 'kindle'
+  ): Promise<{ success: number; message?: string; error?: string }> {
+    const response = await apiClient.get<{ success: number; message?: string; error?: string }>(
+      `/eapi/book/${id}/${hash}/send-to-${type}`
+    );
+    return response.data;
+  },
+
+  /**
    * Fetch official list of active mirror domains
    */
   async getDomains(): Promise<ZLibHostsListing> {
