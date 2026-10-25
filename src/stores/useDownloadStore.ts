@@ -5,6 +5,7 @@ import { Platform, Alert } from 'react-native';
 import { router } from 'expo-router';
 import { zlibApi } from '../api/endpoints';
 import { ZLibBook } from '../types/zlib';
+import { Config } from '../constants/config';
 import { useAuthStore } from './useAuthStore';
 import { useDomainStore } from './useDomainStore';
 import { useBookshelfStore } from './useBookshelfStore';
@@ -187,6 +188,14 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
         }
       }
 
+      // Append auth credentials to query params (official APK SingleItemViewModel behavior)
+      if (user && user.id && user.remix_userkey) {
+        const delimiter = directUrl.includes('?') ? '&' : '?';
+        if (!directUrl.includes('remix_userid=')) {
+          directUrl = `${directUrl}${delimiter}remix_userid=${user.id}&remix_userkey=${user.remix_userkey}`;
+        }
+      }
+
       // Web platform fallback: direct download or local blob
       if (Platform.OS === 'web') {
         if (typeof window !== 'undefined') {
@@ -240,8 +249,11 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
         'source': 'android',
         'ANDROID-APP-VERSION': '1.11.4',
         'appversion': '1.11.4',
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
+        'User-Agent': 'okhttp/4.9.2',
       };
+      if (Config.CLIENT_SECRET) {
+        downloadHeaders['Authorization'] = Config.CLIENT_SECRET;
+      }
       if (user && user.id && user.remix_userkey) {
         downloadHeaders['remix-userid'] = user.id.toString();
         downloadHeaders['remix-userkey'] = user.remix_userkey;
@@ -304,6 +316,7 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
       const resError = err.response?.data?.error || err.response?.data?.message;
       const status = err.response?.status;
       const msg = resError || err.message || '下载失败';
+      const is502 = status === 502 || (typeof msg === 'string' && msg.includes('502'));
 
       if (
         status === 403 ||
@@ -320,10 +333,10 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
             { text: '前往登录', onPress: () => router.push('/profile') },
           ]
         );
-      } else if (status === 502) {
+      } else if (is502) {
         Alert.alert(
-          '代理节点未就绪',
-          '当前代理节点未连接到官方源站，请确保已在 Cloudflare Worker 中放行状态码（status < 500），或在「我的」页面切换备用镜像节点。'
+          '代理节点未就绪 (502)',
+          '当前代理节点未连接到官方源站，请确保已在 Cloudflare Worker 中启用 redirect: \'follow\'，或在「我的」页面切换备用镜像节点。'
         );
       } else if (
         typeof msg === 'string' &&
