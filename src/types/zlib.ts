@@ -60,7 +60,8 @@ export interface ZLibFile {
   allowDownload: boolean;
   author: string;
   description?: string;
-  dlLink: string; // Direct download CDN URL
+  downloadLink?: string; // Real property returned by official API
+  dlLink?: string; // Compatibility alias
   extension: string;
 }
 

@@ -86,9 +86,10 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
 
       try {
         const fileData = await zlibApi.getDownloadLink(book.id, book.hash);
-        if (fileData.success === 1 && fileData.file?.dlLink) {
-          directUrl = fileData.file.dlLink;
-          if (fileData.file.extension) resolvedExtension = fileData.file.extension;
+        const resolvedDl = fileData.file?.downloadLink || fileData.file?.dlLink;
+        if (fileData.success === 1 && resolvedDl) {
+          directUrl = resolvedDl;
+          if (fileData.file?.extension) resolvedExtension = fileData.file.extension;
         } else {
           lastErrorMessage = fileData.error || fileData.message || '';
         }
@@ -260,24 +261,42 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
         downloadHeaders['Cookie'] = `remix_userId=${user.id}; remix_userkey=${user.remix_userkey}`;
       }
 
-      const downloadedFile = await File.downloadFileAsync(directUrl, destinationFile, {
-        idempotent: true,
-        headers: downloadHeaders,
-        onProgress: (p) => {
-          const total = p.totalBytes;
-          const written = p.bytesWritten;
-          const progress = total > 0 ? Math.round((written / total) * 100) : 50;
-          set((state) => ({
-            tasks: {
-              ...state.tasks,
-              [book.id]: {
-                ...state.tasks[book.id],
-                progress,
-              },
+      const onProgress = (p: { totalBytes: number; bytesWritten: number }) => {
+        const total = p.totalBytes;
+        const written = p.bytesWritten;
+        const progress = total > 0 ? Math.round((written / total) * 100) : 50;
+        set((state) => ({
+          tasks: {
+            ...state.tasks,
+            [book.id]: {
+              ...state.tasks[book.id],
+              progress,
             },
-          }));
-        },
-      });
+          },
+        }));
+      };
+
+      let downloadedFile: any;
+      try {
+        downloadedFile = await File.downloadFileAsync(directUrl, destinationFile, {
+          idempotent: true,
+          headers: downloadHeaders,
+          onProgress,
+        });
+      } catch (directErr) {
+        const currentBaseUrl = useDomainStore.getState().currentBaseUrl;
+        if (currentBaseUrl && !directUrl.includes('/proxy-file')) {
+          console.warn('Direct CDN download failed, falling back to proxy stream...', directErr);
+          const proxiedUrl = `${currentBaseUrl}/proxy-file?url=${encodeURIComponent(directUrl)}`;
+          downloadedFile = await File.downloadFileAsync(proxiedUrl, destinationFile, {
+            idempotent: true,
+            headers: downloadHeaders,
+            onProgress,
+          });
+        } else {
+          throw directErr;
+        }
+      }
 
       const localUri = downloadedFile.uri;
 
