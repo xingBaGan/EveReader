@@ -32,10 +32,13 @@ import {
   BookOpen,
   MoreVertical,
   CheckCircle,
+  FileText,
 } from 'lucide-react-native';
 
 export default function ShelfScreen() {
   const [activeTab, setActiveTab] = useState<'bookshelf' | 'cloud_downloaded' | 'saved'>('bookshelf');
+  const [importedNotice, setImportedNotice] = useState<BookshelfItem | null>(null);
+  const [importLoading, setImportLoading] = useState(false);
   const user = useAuthStore((s) => s.user);
 
   const bookshelfBooks = useBookshelfStore((s) => s.books);
@@ -52,6 +55,21 @@ export default function ShelfScreen() {
 
   useEffect(() => {
     loadBookshelf();
+    // Also sync any completed downloads from useDownloadStore into bookshelf
+    const tasks = useDownloadStore.getState().tasks;
+    Object.values(tasks).forEach((t) => {
+      if (t.status === 'completed' && t.localUri && !bookshelfBooks[t.bookId]) {
+        useBookshelfStore.getState().addOrUpdateBook({
+          id: t.bookId,
+          title: t.title,
+          cover: t.cover,
+          extension: t.extension,
+          filesizeString: t.filesizeString,
+          localUri: t.localUri,
+          source: 'download',
+        });
+      }
+    });
   }, []);
 
   // 1. Fetch Cloud Account Download History
@@ -105,15 +123,28 @@ export default function ShelfScreen() {
   // Handle local book import
   const handleImportBook = async () => {
     try {
+      setImportLoading(true);
       const file = await pickLocalBookFile();
-      if (!file) return;
+      if (!file) {
+        setImportLoading(false);
+        return;
+      }
 
       const newBook = await importLocalBook(file.name, file.uri, file.size);
-      Alert.alert('导入成功', `已添加《${newBook.title}》至书架`, [
-        { text: '稍后阅读', style: 'cancel' },
-        { text: '立即阅读', onPress: () => openReader(newBook) },
-      ]);
+      
+      // Auto switch to bookshelf tab, clear filter, and sort by recent
+      setActiveTab('bookshelf');
+      setFilterFormat('all');
+      setSortBy('recent');
+      setImportedNotice(newBook);
+      setImportLoading(false);
+
+      // Auto dismiss notice after 8 seconds
+      setTimeout(() => {
+        setImportedNotice((cur) => (cur?.id === newBook.id ? null : cur));
+      }, 8000);
     } catch (e: any) {
+      setImportLoading(false);
       Alert.alert('导入失败', e.message || '选取文件出错');
     }
   };
@@ -168,9 +199,18 @@ export default function ShelfScreen() {
         </View>
 
         <View style={styles.headerActions}>
-          <Pressable style={styles.actionBtn} onPress={handleImportBook}>
-            <Plus size={16} color="#38bdf8" />
-            <Text style={styles.actionBtnText}>导入</Text>
+          <Pressable
+            style={styles.actionBtn}
+            onPress={handleImportBook}
+            disabled={importLoading}>
+            {importLoading ? (
+              <ActivityIndicator size="small" color="#38bdf8" />
+            ) : (
+              <Plus size={16} color="#38bdf8" />
+            )}
+            <Text style={styles.actionBtnText}>
+              {importLoading ? '导入中...' : '导入'}
+            </Text>
           </Pressable>
 
           {activeTab === 'bookshelf' ? (
@@ -216,6 +256,33 @@ export default function ShelfScreen() {
           </Text>
         </Pressable>
       </View>
+
+      {/* In-App Import Success Banner */}
+      {importedNotice ? (
+        <View style={styles.importedBanner}>
+          <View style={styles.importedBannerLeft}>
+            <CheckCircle size={18} color="#10b981" />
+            <Text style={styles.importedBannerText} numberOfLines={1}>
+              已成功导入《{importedNotice.title}》
+            </Text>
+          </View>
+          <View style={styles.importedBannerActions}>
+            <Pressable
+              style={styles.importedReadBtn}
+              onPress={() => {
+                openReader(importedNotice);
+                setImportedNotice(null);
+              }}>
+              <Text style={styles.importedReadBtnText}>立即阅读</Text>
+            </Pressable>
+            <Pressable
+              style={styles.importedCloseBtn}
+              onPress={() => setImportedNotice(null)}>
+              <Text style={styles.importedCloseText}>✕</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
 
       {/* Bookshelf Tab Content */}
       {activeTab === 'bookshelf' ? (
@@ -273,11 +340,20 @@ export default function ShelfScreen() {
               <Library size={48} color="#334155" />
               <Text style={styles.emptyTitle}>书架空空如也</Text>
               <Text style={styles.emptySubtitle}>
-                你可以点击右上角「+ 导入」本地 EPUB/TXT，或在「发现」「搜索」中下载图书
+                你可以点击右上角「+ 导入」本地 EPUB/TXT/PDF，或在「发现」「搜索」中下载图书
               </Text>
-              <Pressable style={styles.importEmptyBtn} onPress={handleImportBook}>
-                <Plus size={16} color="#fff" />
-                <Text style={styles.importEmptyBtnText}>导入本地图书文件</Text>
+              <Pressable
+                style={styles.importEmptyBtn}
+                onPress={handleImportBook}
+                disabled={importLoading}>
+                {importLoading ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Plus size={16} color="#fff" />
+                )}
+                <Text style={styles.importEmptyBtnText}>
+                  {importLoading ? '正在选择文件...' : '导入本地图书 (PDF/EPUB/TXT)'}
+                </Text>
               </Pressable>
             </View>
           ) : viewMode === 'grid' ? (
@@ -288,76 +364,92 @@ export default function ShelfScreen() {
               numColumns={2}
               keyExtractor={(item) => `shelf-grid-${item.id}`}
               contentContainerStyle={styles.gridContent}
-              renderItem={({ item }) => (
-                <Pressable
-                  style={styles.gridCard}
-                  onPress={() => openReader(item)}
-                  onLongPress={() => handleBookOptions(item)}>
-                  <View style={styles.gridCoverWrapper}>
-                    {item.cover ? (
-                      <Image
-                        source={{ uri: item.cover }}
-                        style={styles.gridCover}
-                        contentFit="cover"
-                      />
-                    ) : (
-                      <View style={styles.gridCoverFallback}>
-                        <BookOpen size={32} color="#64748b" />
-                        <Text style={styles.gridCoverFallbackTitle} numberOfLines={2}>
-                          {item.title}
-                        </Text>
-                      </View>
-                    )}
+              renderItem={({ item }) => {
+                const isPdf = item.extension.toLowerCase() === 'pdf';
+                return (
+                  <Pressable
+                    style={styles.gridCard}
+                    onPress={() => openReader(item)}
+                    onLongPress={() => handleBookOptions(item)}>
+                    <View style={styles.gridCoverWrapper}>
+                      {item.cover ? (
+                        <Image
+                          source={{ uri: item.cover }}
+                          style={styles.gridCover}
+                          contentFit="cover"
+                        />
+                      ) : (
+                        <View
+                          style={[
+                            styles.gridCoverFallback,
+                            isPdf && styles.pdfCoverFallback,
+                          ]}>
+                          {isPdf ? (
+                            <FileText size={36} color="#ef4444" />
+                          ) : (
+                            <BookOpen size={32} color="#64748b" />
+                          )}
+                          <Text
+                            style={[
+                              styles.gridCoverFallbackTitle,
+                              isPdf && { color: '#f87171' },
+                            ]}
+                            numberOfLines={2}>
+                            {item.title}
+                          </Text>
+                        </View>
+                      )}
 
-                    {/* Format Badge */}
-                    <View
-                      style={[
-                        styles.gridFormatBadge,
-                        item.extension === 'pdf'
-                          ? styles.pdfBadge
-                          : item.extension === 'txt'
-                          ? styles.txtBadge
-                          : styles.epubBadge,
-                      ]}>
-                      <Text style={styles.gridFormatText}>
-                        {item.extension.toUpperCase()}
-                      </Text>
-                    </View>
-
-                    {/* Progress Bar Over Cover */}
-                    <View style={styles.gridProgressContainer}>
+                      {/* Format Badge */}
                       <View
                         style={[
-                          styles.gridProgressFill,
-                          { width: `${Math.min(100, Math.max(0, item.progress))}%` },
-                        ]}
-                      />
-                    </View>
-                  </View>
+                          styles.gridFormatBadge,
+                          item.extension === 'pdf'
+                            ? styles.pdfBadge
+                            : item.extension === 'txt'
+                            ? styles.txtBadge
+                            : styles.epubBadge,
+                        ]}>
+                        <Text style={styles.gridFormatText}>
+                          {item.extension.toUpperCase()}
+                        </Text>
+                      </View>
 
-                  <View style={styles.gridInfo}>
-                    <Text style={styles.gridTitle} numberOfLines={2}>
-                      {item.title}
-                    </Text>
-                    <View style={styles.gridBottomRow}>
-                      <Text style={styles.gridProgressText}>
-                        {item.progress >= 99 ? (
-                          <Text style={{ color: '#10b981' }}>已读完</Text>
-                        ) : item.progress > 0 ? (
-                          `${item.progress.toFixed(0)}%`
-                        ) : (
-                          '未读'
-                        )}
-                      </Text>
-                      <Pressable
-                        style={styles.gridMoreBtn}
-                        onPress={() => handleBookOptions(item)}>
-                        <MoreVertical size={14} color="#64748b" />
-                      </Pressable>
+                      {/* Progress Bar Over Cover */}
+                      <View style={styles.gridProgressContainer}>
+                        <View
+                          style={[
+                            styles.gridProgressFill,
+                            { width: `${Math.min(100, Math.max(0, item.progress))}%` },
+                          ]}
+                        />
+                      </View>
                     </View>
-                  </View>
-                </Pressable>
-              )}
+
+                    <View style={styles.gridInfo}>
+                      <Text style={styles.gridTitle} numberOfLines={2}>
+                        {item.title}
+                      </Text>
+                      <View style={styles.gridBottomRow}>
+                        <Text style={styles.gridProgressText}>
+                          {item.progress >= 99 ? (
+                            <Text style={{ color: '#10b981' }}>已读完</Text>
+                          ) : item.progress > 0 ? (
+                            `${item.progress.toFixed(0)}%`
+                          ) : (
+                            '未读'
+                          )}
+                        </Text>
+                        <Pressable
+                          style={styles.gridMoreBtn}
+                          onPress={() => handleBookOptions(item)}>
+                          <MoreVertical size={14} color="#64748b" />
+                        </Pressable>
+                      </View>
+                    </View>
+                  </Pressable>
+                );
+              }}
             />
           ) : (
             /* NeatReader Detailed List View */
@@ -366,71 +458,83 @@ export default function ShelfScreen() {
               data={sortedBooks}
               keyExtractor={(item) => `shelf-list-${item.id}`}
               contentContainerStyle={styles.listContent}
-              renderItem={({ item }) => (
-                <Pressable
-                  style={styles.localCard}
-                  onPress={() => openReader(item)}
-                  onLongPress={() => handleBookOptions(item)}>
-                  <View style={styles.listCoverWrapper}>
-                    {item.cover ? (
-                      <Image
-                        source={{ uri: item.cover }}
-                        style={styles.localCover}
-                        contentFit="cover"
-                      />
-                    ) : (
-                      <View style={[styles.localCover, styles.gridCoverFallback]}>
-                        <BookOpen size={20} color="#64748b" />
-                      </View>
-                    )}
-                  </View>
-
-                  <View style={styles.localInfo}>
-                    <Text style={styles.localTitle} numberOfLines={2}>
-                      {item.title}
-                    </Text>
-
-                    <Text style={styles.localAuthor} numberOfLines={1}>
-                      {item.author || '未知作者'}
-                    </Text>
-
-                    {/* Progress Bar */}
-                    <View style={styles.listProgressBar}>
-                      <View
-                        style={[
-                          styles.listProgressFill,
-                          { width: `${Math.min(100, Math.max(0, item.progress))}%` },
-                        ]}
-                      />
+              renderItem={({ item }) => {
+                const isPdf = item.extension.toLowerCase() === 'pdf';
+                return (
+                  <Pressable
+                    style={styles.localCard}
+                    onPress={() => openReader(item)}
+                    onLongPress={() => handleBookOptions(item)}>
+                    <View style={styles.listCoverWrapper}>
+                      {item.cover ? (
+                        <Image
+                          source={{ uri: item.cover }}
+                          style={styles.localCover}
+                          contentFit="cover"
+                        />
+                      ) : (
+                        <View
+                          style={[
+                            styles.localCover,
+                            styles.gridCoverFallback,
+                            isPdf && styles.pdfCoverFallback,
+                          ]}>
+                          {isPdf ? (
+                            <FileText size={22} color="#ef4444" />
+                          ) : (
+                            <BookOpen size={20} color="#64748b" />
+                          )}
+                        </View>
+                      )}
                     </View>
 
-                    <View style={styles.localMeta}>
-                      <View
-                        style={[
-                          styles.extBadge,
-                          item.extension === 'pdf'
-                            ? styles.pdfBadge
-                            : item.extension === 'txt'
-                            ? styles.txtBadge
-                            : styles.epubBadge,
-                        ]}>
-                        <Text style={styles.extText}>{item.extension.toUpperCase()}</Text>
-                      </View>
-                      <Text style={styles.localSize}>
-                        {item.progress >= 99 ? '已读完' : `已读 ${item.progress.toFixed(0)}%`}
+                    <View style={styles.localInfo}>
+                      <Text style={styles.localTitle} numberOfLines={2}>
+                        {item.title}
                       </Text>
-                      {item.filesizeString ? (
-                        <Text style={styles.localSize}>{item.filesizeString}</Text>
-                      ) : null}
-                    </View>
-                  </View>
 
-                  <View style={styles.openBtn}>
-                    <BookOpen size={14} color="#38bdf8" />
-                    <Text style={styles.openBtnText}>阅读</Text>
-                  </View>
-                </Pressable>
-              )}
+                      <Text style={styles.localAuthor} numberOfLines={1}>
+                        {item.author || '未知作者'}
+                      </Text>
+
+                      {/* Progress Bar */}
+                      <View style={styles.listProgressBar}>
+                        <View
+                          style={[
+                            styles.listProgressFill,
+                            { width: `${Math.min(100, Math.max(0, item.progress))}%` },
+                          ]}
+                        />
+                      </View>
+
+                      <View style={styles.localMeta}>
+                        <View
+                          style={[
+                            styles.extBadge,
+                            item.extension === 'pdf'
+                              ? styles.pdfBadge
+                              : item.extension === 'txt'
+                              ? styles.txtBadge
+                              : styles.epubBadge,
+                          ]}>
+                          <Text style={styles.extText}>{item.extension.toUpperCase()}</Text>
+                        </View>
+                        <Text style={styles.localSize}>
+                          {item.progress >= 99 ? '已读完' : `已读 ${item.progress.toFixed(0)}%`}
+                        </Text>
+                        {item.filesizeString ? (
+                          <Text style={styles.localSize}>{item.filesizeString}</Text>
+                        ) : null}
+                      </View>
+                    </View>
+
+                    <View style={styles.openBtn}>
+                      <BookOpen size={14} color="#38bdf8" />
+                      <Text style={styles.openBtnText}>阅读</Text>
+                    </View>
+                  </Pressable>
+                );
+              }}
             />
           )}
         </View>
@@ -574,6 +678,55 @@ const styles = StyleSheet.create({
   tabTextActive: {
     color: '#ffffff',
   },
+  importedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginHorizontal: 16,
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+    borderWidth: 1,
+    borderRadius: 10,
+  },
+  importedBannerLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginRight: 8,
+  },
+  importedBannerText: {
+    flex: 1,
+    color: '#f8fafc',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  importedBannerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  importedReadBtn: {
+    backgroundColor: '#10b981',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  importedReadBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  importedCloseBtn: {
+    padding: 4,
+  },
+  importedCloseText: {
+    color: '#94a3b8',
+    fontSize: 14,
+  },
   filterBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -646,6 +799,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: 12,
     backgroundColor: '#1e293b',
+  },
+  pdfCoverFallback: {
+    backgroundColor: '#2d1517',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.2)',
   },
   gridCoverFallbackTitle: {
     color: '#94a3b8',

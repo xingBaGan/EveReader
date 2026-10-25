@@ -17,6 +17,7 @@ import { ReaderTocDrawer } from './ReaderTocDrawer';
 import { ReaderBookmarksModal } from './ReaderBookmarksModal';
 import { ReaderSearchModal } from './ReaderSearchModal';
 import { TxtReaderView } from './TxtReaderView';
+import { PdfReaderView } from './PdfReaderView';
 import { ReaderWebView, ReaderWebViewRef } from './ReaderWebView';
 import { READER_BUNDLE_HTML } from './readerTemplate';
 import { readBookAsBase64 } from '../../utils/fileStorage';
@@ -42,6 +43,7 @@ export function ReaderModal() {
 
   const themeConfig = READER_THEMES[settings.theme] || READER_THEMES.light;
   const isTxt = currentBook?.extension.toLowerCase() === 'txt';
+  const isPdf = currentBook?.extension.toLowerCase() === 'pdf';
 
   // Load Book Data
   useEffect(() => {
@@ -51,8 +53,8 @@ export function ReaderModal() {
       return;
     }
 
-    if (isTxt) {
-      // Handled directly by TxtReaderView
+    if (isTxt || isPdf) {
+      // Handled directly by TxtReaderView or PdfReaderView
       return;
     }
 
@@ -82,7 +84,7 @@ export function ReaderModal() {
     return () => {
       isMounted = false;
     };
-  }, [isOpen, currentBook?.id, currentBook?.localUri]);
+  }, [isOpen, currentBook?.id, currentBook?.localUri, isTxt, isPdf]);
 
   // Handle messages from WebView reader engine
   const handleWebViewMessage = (data: any) => {
@@ -120,10 +122,10 @@ export function ReaderModal() {
 
   // Sync settings changes to WebView
   useEffect(() => {
-    if (!isTxt && webViewRef.current) {
+    if (!isTxt && !isPdf && webViewRef.current) {
       webViewRef.current.postMessage('applySettings', { settings });
     }
-  }, [settings]);
+  }, [settings, isTxt, isPdf]);
 
   // Actions passed to UI controls
   const handlePrevChapter = () => {
@@ -163,42 +165,46 @@ export function ReaderModal() {
         style={
           settings.theme === 'dark' || settings.theme === 'black' ? 'light' : 'dark'
         }
-        hidden={!isBarsVisible}
+        hidden={!isBarsVisible && !isPdf}
       />
 
       <View style={[styles.container, { backgroundColor: themeConfig.bg }]}>
-        {/* Top Control Bar */}
-        {isBarsVisible ? <ReaderTopBar /> : null}
+        {/* Top Control Bar (Always visible or toggleable on PDF, toggleable on EPUB/TXT) */}
+        {isBarsVisible || isPdf ? <ReaderTopBar /> : null}
 
         {/* Reader Core Canvas */}
-        {error ? (
-          <View style={styles.centerBox}>
-            <Text style={[styles.errorText, { color: themeConfig.text }]}>{error}</Text>
-            <Pressable style={styles.closeErrorBtn} onPress={closeReader}>
-              <X size={16} color="#fff" />
-              <Text style={styles.closeErrorBtnText}>返回书架</Text>
-            </Pressable>
-          </View>
-        ) : isTxt && currentBook.localUri ? (
-          <TxtReaderView uri={currentBook.localUri} onToggleBars={toggleBars} />
-        ) : loading || !base64Content ? (
-          <View style={styles.centerBox}>
-            <ActivityIndicator size="large" color="#0284c7" />
-            <Text style={[styles.loadingText, { color: themeConfig.text }]}>
-              正在准备图书《{currentBook.title}》...
-            </Text>
-          </View>
-        ) : (
-          <ReaderWebView
-            ref={webViewRef}
-            html={READER_BUNDLE_HTML}
-            onMessage={handleWebViewMessage}
-            style={styles.webView}
-          />
-        )}
+        <View style={[styles.bodyContainer, isPdf && styles.pdfBodySpacing]}>
+          {error ? (
+            <View style={styles.centerBox}>
+              <Text style={[styles.errorText, { color: themeConfig.text }]}>{error}</Text>
+              <Pressable style={styles.closeErrorBtn} onPress={closeReader}>
+                <X size={16} color="#fff" />
+                <Text style={styles.closeErrorBtnText}>返回书架</Text>
+              </Pressable>
+            </View>
+          ) : isPdf && currentBook.localUri ? (
+            <PdfReaderView uri={currentBook.localUri} onToggleBars={toggleBars} />
+          ) : isTxt && currentBook.localUri ? (
+            <TxtReaderView uri={currentBook.localUri} onToggleBars={toggleBars} />
+          ) : loading || !base64Content ? (
+            <View style={styles.centerBox}>
+              <ActivityIndicator size="large" color="#0284c7" />
+              <Text style={[styles.loadingText, { color: themeConfig.text }]}>
+                正在准备图书《{currentBook.title}》...
+              </Text>
+            </View>
+          ) : (
+            <ReaderWebView
+              ref={webViewRef}
+              html={READER_BUNDLE_HTML}
+              onMessage={handleWebViewMessage}
+              style={styles.webView}
+            />
+          )}
+        </View>
 
-        {/* Bottom Control Bar */}
-        {isBarsVisible ? (
+        {/* Bottom Control Bar (for EPUB and TXT) */}
+        {isBarsVisible && !isPdf ? (
           <ReaderBottomBar
             onPrevChapter={handlePrevChapter}
             onNextChapter={handleNextChapter}
@@ -223,6 +229,12 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     position: 'relative',
+  },
+  bodyContainer: {
+    flex: 1,
+  },
+  pdfBodySpacing: {
+    paddingTop: 50,
   },
   webView: {
     flex: 1,
