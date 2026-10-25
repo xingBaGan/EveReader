@@ -1,6 +1,6 @@
 import { TextBubble } from '../types/manga';
 import { sortReadingOrder } from './bubbleEngine';
-import * as ScreenOverlay from 'screen-translator-overlay';
+import { isScreenTranslatorSupported, recognizeImageNative } from './screenTranslatorBridge';
 
 /**
  * 精选漫画样本页面标注数据（高精度基准）
@@ -183,9 +183,9 @@ export async function detectBubblesForPage(
   originalHeight: number = 800
 ): Promise<TextBubble[]> {
   // 1. 尝试调用原生端侧深度学习检测器 (ComicTextDetector RT-DETR + MangaOcrProcessor)
-  if (ScreenOverlay.isSupported() && base64DataUrl) {
+  if (isScreenTranslatorSupported() && base64DataUrl) {
     try {
-      const res = await ScreenOverlay.recognizeImage(base64DataUrl, 'ja');
+      const res = await recognizeImageNative(base64DataUrl, 'ja');
       if (res && res.bubbles && res.bubbles.length > 0) {
         const nativeBubbles: TextBubble[] = res.bubbles.map((b: any, index: number) => ({
           id: `bubble_p${pageNum}_${index}_${Date.now()}`,
