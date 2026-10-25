@@ -1,0 +1,16 @@
+{
+  "name": "screen-translator-overlay",
+  "version": "1.0.0",
+  "description": "Android System Overlay and Screen Capture Native Module for Real-Time Comic Translation",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {},
+  "keywords": [
+    "expo",
+    "screen-capture",
+    "overlay",
+    "translator"
+  ],
+  "author": "",
+  "license": "MIT"
+}

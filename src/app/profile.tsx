@@ -118,6 +118,11 @@ export default function ProfileScreen() {
               </View>
             </View>
 
+            <View style={styles.kindleRow}>
+              <Text style={styles.kindleLabel}>Kindle 推送邮箱:</Text>
+              <Text style={styles.kindleValue}>{user.kindle || '未设置 (需在官网绑定)'}</Text>
+            </View>
+
             <Pressable style={styles.logoutBtn} onPress={logout}>
               <LogOut size={16} color="#f87171" />
               <Text style={styles.logoutBtnText}>退出当前账号</Text>
@@ -338,6 +343,25 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     color: '#38bdf8',
+  },
+  kindleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#0f172a',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginTop: 10,
+  },
+  kindleLabel: {
+    fontSize: 12,
+    color: '#94a3b8',
+  },
+  kindleValue: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#f8fafc',
   },
   logoutBtn: {
     flexDirection: 'row',

@@ -28,6 +28,7 @@ import {
   Check,
   ExternalLink,
 } from 'lucide-react-native';
+import { router } from 'expo-router';
 
 import { ZLibBook, ZLibFormat } from '../../types/zlib';
 import { useBookDetailStore } from '../../stores/useBookDetailStore';
@@ -183,18 +184,62 @@ export function BookDetailModal() {
     }
   };
 
+  const canSendEmail =
+    displayBook.sendToEmailAvailable !== false &&
+    displayBook.isSendToEmailAvailable !== false;
+  const canSendKindle = displayBook.kindleAvailable !== false;
+
   // Push to Email or Kindle
   const handleSendTo = (type: 'email' | 'kindle') => {
     const user = useAuthStore.getState().user;
     if (!user) {
-      Alert.alert('需要登录', '推送书籍需要登录 Z-Library 账号，请在「我的」登录后重试。');
+      Alert.alert(
+        '需要登录 Z-Library 账号',
+        '推送书籍需要关联您的账号配额与邮箱，请先登录账号。',
+        [
+          { text: '稍后再说', style: 'cancel' },
+          {
+            text: '前往登录',
+            onPress: () => {
+              closeBookDetail();
+              router.push('/profile');
+            },
+          },
+        ]
+      );
       return;
     }
 
-    const typeLabel = type === 'email' ? '邮箱' : 'Kindle 设备';
+    if (type === 'email' && !canSendEmail) {
+      Alert.alert(
+        '无法发送至邮箱',
+        `该书籍文件体积（${displayBook.filesizeString || '过大'}）已超出邮件附件 25MB 的最大限制，官方源站不支持通过邮件推送。请直接点击下方「下载书籍」保存到本地阅读。`
+      );
+      return;
+    }
+
+    if (type === 'kindle' && !canSendKindle) {
+      Alert.alert(
+        '无法发送至 Kindle',
+        `该书籍文件体积（${displayBook.filesizeString || '过大'}）已超出亚马逊 Kindle 50MB 的传输上限，官方源站不支持推送到 Kindle。请直接点击下方「下载书籍」保存到本地。`
+      );
+      return;
+    }
+
+    if (type === 'kindle' && !user.kindle) {
+      Alert.alert(
+        '未绑定 Kindle 邮箱',
+        '您的 Z-Library 账号中尚未设置 Kindle 接收邮箱。请前往「我的」页面或登录 Z-Library 官网设置您的 Kindle 邮箱（如 xxx@kindle.com）后重试。'
+      );
+      return;
+    }
+
+    const targetAddress = type === 'email' ? user.email : user.kindle;
+    const typeLabel = type === 'email' ? '邮箱' : 'Kindle';
+
     Alert.alert(
       `推送到 ${typeLabel}`,
-      `确认将《${displayBook.title}》推送到您绑定的 ${typeLabel} 吗？这同样会消耗您当日的下载配额。`,
+      `确认将《${displayBook.title}》推送到您绑定的 ${typeLabel}（${targetAddress}）吗？这会消耗您今日的下载配额。`,
       [
         { text: '取消', style: 'cancel' },
         {
@@ -202,13 +247,20 @@ export function BookDetailModal() {
           onPress: async () => {
             try {
               const res = await zlibApi.sendBookTo(displayBook.id, displayBook.hash, type);
-              if (res.success) {
-                Alert.alert('推送成功', `已成功将书籍发送至您的 ${typeLabel}，请注意查收。`);
+              if (res.success === 1) {
+                Alert.alert(
+                  '推送成功',
+                  `已成功将书籍发送至您的 ${typeLabel}（${targetAddress}），请注意查收。`
+                );
               } else {
-                Alert.alert('推送失败', res.error || '服务器处理超时，请稍后重试');
+                Alert.alert(
+                  '推送失败',
+                  res.error || res.message || '官方服务器拒绝了推送请求，请稍后重试。'
+                );
               }
             } catch (err: any) {
-              Alert.alert('推送失败', err.response?.data?.error || err.message || '请求失败');
+              const resMsg = err.response?.data?.error || err.response?.data?.message;
+              Alert.alert('推送失败', resMsg || err.message || '网络连接超时');
             }
           },
         },
@@ -579,21 +631,37 @@ export function BookDetailModal() {
           ]}>
           <View style={styles.bottomSecondaryActions}>
             <Pressable
-              style={[styles.smallActionBtn, { backgroundColor: theme.surfaceContainerHigh }]}
+              style={[
+                styles.smallActionBtn,
+                { backgroundColor: theme.surfaceContainerHigh },
+                !canSendKindle && { opacity: 0.45 },
+              ]}
               onPress={() => handleSendTo('kindle')}
               hitSlop={8}>
-              <Send size={16} color={theme.onSurfaceVariant} />
-              <Text style={[Typography.labelSmall, { color: theme.onSurfaceVariant, marginTop: 2 }]}>
+              <Send size={16} color={!canSendKindle ? theme.outline : theme.onSurfaceVariant} />
+              <Text
+                style={[
+                  Typography.labelSmall,
+                  { color: !canSendKindle ? theme.outline : theme.onSurfaceVariant, marginTop: 2 },
+                ]}>
                 Kindle
               </Text>
             </Pressable>
 
             <Pressable
-              style={[styles.smallActionBtn, { backgroundColor: theme.surfaceContainerHigh }]}
+              style={[
+                styles.smallActionBtn,
+                { backgroundColor: theme.surfaceContainerHigh },
+                !canSendEmail && { opacity: 0.45 },
+              ]}
               onPress={() => handleSendTo('email')}
               hitSlop={8}>
-              <Mail size={16} color={theme.onSurfaceVariant} />
-              <Text style={[Typography.labelSmall, { color: theme.onSurfaceVariant, marginTop: 2 }]}>
+              <Mail size={16} color={!canSendEmail ? theme.outline : theme.onSurfaceVariant} />
+              <Text
+                style={[
+                  Typography.labelSmall,
+                  { color: !canSendEmail ? theme.outline : theme.onSurfaceVariant, marginTop: 2 },
+                ]}>
                 邮箱
               </Text>
             </Pressable>

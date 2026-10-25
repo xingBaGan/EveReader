@@ -28,8 +28,9 @@ export interface ZLibBook {
   readOnlineAvailable: boolean;
   readOnlineUrl?: string;
   isUserSavedBook: boolean;
-  kindleAvailable: boolean;
-  isSendToEmailAvailable: boolean;
+  kindleAvailable?: boolean;
+  isSendToEmailAvailable?: boolean;
+  sendToEmailAvailable?: boolean;
 }
 
 export interface ZLibPagination {
@@ -66,6 +67,7 @@ export interface ZLibFileListing {
   success: number;
   file?: ZLibFile;
   error?: string;
+  message?: string;
 }
 
 export interface ZLibFormat {

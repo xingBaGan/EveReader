@@ -16,6 +16,8 @@ export function ReaderSettingsModal() {
   const setIsSettingsOpen = useReaderStore((s) => s.setIsSettingsOpen);
   const settings = useReaderStore((s) => s.settings);
   const updateSettings = useReaderStore((s) => s.updateSettings);
+  const isBubbleDetectActive = useReaderStore((s) => s.isBubbleDetectActive);
+  const toggleBubbleDetection = useReaderStore((s) => s.toggleBubbleDetection);
 
   const themeConfig = READER_THEMES[settings.theme] || READER_THEMES.light;
 
@@ -192,6 +194,36 @@ export function ReaderSettingsModal() {
                   ))}
                 </View>
               </View>
+
+              {/* Manga Bubble Detection */}
+              <View style={styles.section}>
+                <View style={styles.switchRow}>
+                  <View style={{ flex: 1, marginRight: 12 }}>
+                    <Text style={[styles.sectionLabel, { color: themeConfig.barText, marginBottom: 2 }]}>
+                      漫画气泡检测
+                    </Text>
+                    <Text style={{ fontSize: 11, color: themeConfig.barText, opacity: 0.6 }}>
+                      自动识别对白气泡、拟声词与标题，阅读顺序编号标注
+                    </Text>
+                  </View>
+                  <Pressable
+                    style={[
+                      styles.pillBtn,
+                      isBubbleDetectActive && styles.pillBtnActive,
+                      { paddingHorizontal: 16, paddingVertical: 6, minWidth: 70, alignItems: 'center' },
+                    ]}
+                    onPress={() => toggleBubbleDetection()}>
+                    <Text
+                      style={[
+                        styles.pillText,
+                        { color: themeConfig.barText },
+                        isBubbleDetectActive && styles.pillTextActive,
+                      ]}>
+                      {isBubbleDetectActive ? '已开启' : '关闭'}
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
             </View>
           </TouchableWithoutFeedback>
         </View>
@@ -241,6 +273,11 @@ const styles = StyleSheet.create({
   },
   section: {
     marginBottom: 16,
+  },
+  switchRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   sectionLabel: {
     fontSize: 12,

@@ -6,6 +6,7 @@ import {
   BookmarkItem,
   SearchMatchItem,
 } from '../types/reader';
+import { TextBubble } from '../types/manga';
 import { saveJsonFile, loadJsonFile } from '../utils/fileStorage';
 import { useBookshelfStore } from './useBookshelfStore';
 
@@ -25,6 +26,12 @@ interface ReaderStoreState {
   bookmarks: BookmarkItem[];
   searchResults: SearchMatchItem[];
   isSearching: boolean;
+
+  // Manga bubble detection
+  isBubbleDetectActive: boolean;
+  isDetectingBubbles: boolean;
+  detectedBubbles: TextBubble[];
+  selectedBubble: TextBubble | null;
 
   // UI Drawer / Overlay controls
   isBarsVisible: boolean;
@@ -58,6 +65,11 @@ interface ReaderStoreState {
   removeBookmark: (id: string) => Promise<void>;
   setSearchResults: (results: SearchMatchItem[]) => void;
   setIsSearching: (val: boolean) => void;
+
+  toggleBubbleDetection: (active?: boolean) => void;
+  setIsDetectingBubbles: (detecting: boolean) => void;
+  setDetectedBubbles: (bubbles: TextBubble[]) => void;
+  setSelectedBubble: (bubble: TextBubble | null) => void;
 }
 
 const DEFAULT_SETTINGS: ReaderSettings = {
@@ -81,6 +93,11 @@ export const useReaderStore = create<ReaderStoreState>((set, get) => ({
   bookmarks: [],
   searchResults: [],
   isSearching: false,
+
+  isBubbleDetectActive: false,
+  isDetectingBubbles: false,
+  detectedBubbles: [],
+  selectedBubble: null,
 
   isBarsVisible: false,
   isTocOpen: false,
@@ -210,4 +227,21 @@ export const useReaderStore = create<ReaderStoreState>((set, get) => ({
 
   setSearchResults: (results) => set({ searchResults: results, isSearching: false }),
   setIsSearching: (val) => set({ isSearching: val }),
+
+  toggleBubbleDetection: (active) => {
+    set((state) => {
+      const nextActive = active !== undefined ? active : !state.isBubbleDetectActive;
+      return {
+        isBubbleDetectActive: nextActive,
+        // If turned off, clear detected bubbles
+        ...(nextActive ? {} : { detectedBubbles: [], selectedBubble: null }),
+      };
+    });
+  },
+
+  setIsDetectingBubbles: (detecting) => set({ isDetectingBubbles: detecting }),
+
+  setDetectedBubbles: (bubbles) => set({ detectedBubbles: bubbles }),
+
+  setSelectedBubble: (bubble) => set({ selectedBubble: bubble }),
 }));

@@ -6,6 +6,7 @@ import { router } from 'expo-router';
 import { zlibApi } from '../api/endpoints';
 import { ZLibBook } from '../types/zlib';
 import { useAuthStore } from './useAuthStore';
+import { useDomainStore } from './useDomainStore';
 import { useBookshelfStore } from './useBookshelfStore';
 import { useReaderStore } from './useReaderStore';
 
@@ -77,14 +78,28 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
     try {
       // 2. Get signed CDN download link
       const fileData = await zlibApi.getDownloadLink(book.id, book.hash);
-      if (fileData.success === 0 || !fileData.file?.dlLink) {
-        const errorMsg = fileData.error || '未获取到有效下载链接';
-        if (errorMsg.toLowerCase().includes('limit')) {
+      const allowDownload = fileData.file?.allowDownload !== false;
+      const dlLink = fileData.file?.dlLink;
+
+      if (fileData.success === 0 || !allowDownload || !dlLink) {
+        const errorMsg = fileData.error || fileData.message;
+        const isQuotaReached =
+          !allowDownload ||
+          (errorMsg && errorMsg.toLowerCase().includes('limit')) ||
+          (errorMsg && errorMsg.toLowerCase().includes('quota')) ||
+          (errorMsg && errorMsg.includes('5 downloads'));
+
+        const isAuthError =
+          (errorMsg && errorMsg.toLowerCase().includes('login')) ||
+          (errorMsg && errorMsg.toLowerCase().includes('credential')) ||
+          (errorMsg && errorMsg.toLowerCase().includes('sign in'));
+
+        if (isQuotaReached) {
           Alert.alert(
-            '今日下载额度已用完',
-            '您今日的免费下载额度已达到上限（普通用户每日限额 10 本）。额度将在 24 小时后重置，或可通过赞助 Z-Library 提高额度。'
+            '今日下载配额已达上限',
+            '您今日的免费下载额度已达到上限（普通用户每日限额 10 本，未登录 IP 限额 5 本）。额度将在 24 小时后重置，或可通过赞助 Z-Library 提高额度。'
           );
-        } else if (errorMsg.toLowerCase().includes('login')) {
+        } else if (isAuthError) {
           Alert.alert(
             '登录凭证已失效',
             '您的登录令牌已过期或失效，请重新登录账号。',
@@ -94,7 +109,10 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
             ]
           );
         } else {
-          Alert.alert('下载失败', errorMsg);
+          Alert.alert(
+            '无法获取下载直链',
+            errorMsg || '官方源站暂未开放该文件的直链下载，请稍后重试或尝试在详情页切换格式。'
+          );
         }
         set((state) => ({
           tasks: {
@@ -102,14 +120,19 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
             [book.id]: {
               ...state.tasks[book.id],
               status: 'failed',
-              error: errorMsg,
+              error: errorMsg || '无法获取下载直链',
             },
           },
         }));
         return undefined;
       }
 
-      const dlLink = fileData.file.dlLink;
+      // Handle relative download links
+      let directUrl = dlLink;
+      if (directUrl.startsWith('/')) {
+        const currentBaseUrl = useDomainStore.getState().currentBaseUrl;
+        directUrl = `${currentBaseUrl}${directUrl}`;
+      }
 
       // Web platform fallback: direct download or local blob
       if (Platform.OS === 'web') {
@@ -120,7 +143,7 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
               ...state.tasks[book.id],
               progress: 100,
               status: 'completed',
-              localUri: dlLink,
+              localUri: directUrl,
             },
           },
         }));
@@ -133,13 +156,13 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
           cover: book.cover,
           extension: book.extension,
           filesizeString: book.filesizeString,
-          localUri: dlLink,
+          localUri: directUrl,
           source: 'download',
         });
 
         // Open in reader
         get().openBookInReader(book.id);
-        return dlLink;
+        return directUrl;
       }
 
       // Native platform (iOS/Android): Download using Expo FileSystem API
@@ -147,7 +170,7 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
       const filename = `${sanitizedTitle}_${book.id}.${book.extension}`;
       const destinationFile = new File(Paths.document, filename);
 
-      const downloadedFile = await File.downloadFileAsync(dlLink, destinationFile);
+      const downloadedFile = await File.downloadFileAsync(directUrl, destinationFile);
       const localUri = downloadedFile.uri;
 
       set((state) => ({
@@ -180,13 +203,16 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
       return localUri;
     } catch (err: any) {
       console.error('Download error:', err);
-      const resError = err.response?.data?.error;
+      const resError = err.response?.data?.error || err.response?.data?.message;
       const status = err.response?.status;
       const msg = resError || err.message || '下载失败';
 
       if (
         status === 403 ||
-        (typeof msg === 'string' && msg.toLowerCase().includes('login'))
+        (typeof msg === 'string' &&
+          (msg.toLowerCase().includes('login') ||
+            msg.toLowerCase().includes('credential') ||
+            msg.toLowerCase().includes('sign in')))
       ) {
         Alert.alert(
           '需要登录 Z-Library 账号',
@@ -201,10 +227,15 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
           '代理节点未就绪',
           '当前代理节点未连接到官方源站，请确保已在 Cloudflare Worker 中放行状态码（status < 500），或在「我的」页面切换备用镜像节点。'
         );
-      } else if (typeof msg === 'string' && msg.toLowerCase().includes('limit')) {
+      } else if (
+        typeof msg === 'string' &&
+        (msg.toLowerCase().includes('limit') ||
+          msg.toLowerCase().includes('quota') ||
+          msg.includes('5 downloads'))
+      ) {
         Alert.alert(
           '今日下载额度已用完',
-          '您今日的免费下载额度已达到上限（普通用户每日限额 10 本）。额度将在 24 小时后重置。'
+          '您今日的免费下载额度已达到上限（普通用户每日限额 10 本，未登录 IP 限额 5 本）。额度将在 24 小时后重置。'
         );
       } else {
         Alert.alert('下载失败', String(msg));

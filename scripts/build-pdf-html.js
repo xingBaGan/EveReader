@@ -78,6 +78,84 @@ const clientHtml = `<!DOCTYPE html>
       max-width: 100%;
       height: auto;
     }
+    .bubble-overlay-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 10;
+    }
+    .bubble-box {
+      position: absolute;
+      box-sizing: border-box;
+      border-radius: 8px;
+      pointer-events: auto;
+      cursor: pointer;
+      transition: transform 0.15s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      align-items: flex-start;
+    }
+    .bubble-box:active {
+      transform: scale(0.96);
+    }
+    /* 对话气泡 (蓝色光晕) */
+    .bubble-type-bubble {
+      border: 2px solid #38bdf8;
+      background: rgba(56, 189, 248, 0.16);
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
+    }
+    /* 拟声动效词 (玫红虚线框) */
+    .bubble-type-sfx {
+      border: 2px dashed #f43f5e;
+      background: rgba(244, 63, 94, 0.16);
+      box-shadow: 0 0 8px rgba(244, 63, 94, 0.35);
+    }
+    /* 画面大标题 (金橙加粗框) */
+    .bubble-type-title {
+      border: 2.5px solid #ea580c;
+      background: rgba(234, 88, 12, 0.18);
+      box-shadow: 0 0 12px rgba(234, 88, 12, 0.45);
+    }
+    /* 旁白/嵌字 (紫色精细框) */
+    .bubble-type-free_text {
+      border: 2px solid #8b5cf6;
+      background: rgba(139, 92, 246, 0.16);
+      box-shadow: 0 0 8px rgba(139, 92, 246, 0.35);
+    }
+    .bubble-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #0284c7;
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 6px;
+      margin: 2px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+      line-height: 14px;
+    }
+    .bubble-type-sfx .bubble-badge {
+      background: #e11d48;
+    }
+    .bubble-type-title .bubble-badge {
+      background: #ea580c;
+    }
+    .bubble-type-free_text .bubble-badge {
+      background: #7c3aed;
+    }
+    .bubble-tag {
+      font-size: 10px;
+      font-weight: 600;
+      color: #ffffff;
+      opacity: 0.9;
+      margin-left: 2px;
+    }
   </style>
   <script>
 ${pdfJsCode}
@@ -109,6 +187,8 @@ ${pdfJsCode}
       var assembledChunks = null;
       var totalExpectedBytes = 0;
       var bytesReceived = 0;
+      var currentBubbles = [];
+      var isBubbleDetectionActive = false;
 
       var themeBackgrounds = {
         light: '#f1f5f9',
@@ -155,6 +235,12 @@ ${pdfJsCode}
           canvas.style.height = '100%';
 
           wrapper.appendChild(canvas);
+
+          var overlay = document.createElement('div');
+          overlay.className = 'bubble-overlay-layer';
+          overlay.id = 'bubble-overlay';
+          wrapper.appendChild(overlay);
+
           container.appendChild(wrapper);
 
           var ctx = canvas.getContext('2d');
@@ -180,6 +266,11 @@ ${pdfJsCode}
               loader.style.opacity = '0';
               setTimeout(function() { loader.style.display = 'none'; }, 200);
             }
+
+            // 翻页后如果气泡检测处于开启状态，立即自动请求新页面气泡检测
+            if (isBubbleDetectionActive) {
+              requestDetection(canvas);
+            }
           }).catch(function(err) {
             isRendering = false;
           });
@@ -189,8 +280,79 @@ ${pdfJsCode}
         });
       }
 
+      function requestDetection(canvasEl) {
+        var cv = canvasEl || document.querySelector('canvas');
+        if (!cv) return;
+        try {
+          var snapshot = cv.toDataURL('image/jpeg', 0.85);
+          sendToParent({
+            type: 'requestBubbleDetection',
+            pageNum: currentPageNum,
+            snapshot: snapshot,
+            width: cv.width,
+            height: cv.height
+          });
+        } catch (e) {
+          sendToParent({
+            type: 'requestBubbleDetection',
+            pageNum: currentPageNum,
+            width: cv.width,
+            height: cv.height
+          });
+        }
+      }
+
+      function renderBubbleOverlay(bubbles, visible) {
+        var overlay = document.getElementById('bubble-overlay');
+        if (!overlay) return;
+        overlay.innerHTML = '';
+        if (!visible || !bubbles || bubbles.length === 0) return;
+
+        var baseW = 600;
+        var baseH = 800;
+
+        bubbles.forEach(function(b, idx) {
+          var box = b.box;
+          if (!box) return;
+
+          var el = document.createElement('div');
+          var typeClass = 'bubble-type-' + (b.textType || 'bubble');
+          el.className = 'bubble-box ' + typeClass;
+
+          var leftPct = (box.x / baseW) * 100;
+          var topPct = (box.y / baseH) * 100;
+          var widthPct = (box.width / baseW) * 100;
+          var heightPct = (box.height / baseH) * 100;
+
+          el.style.left = Math.max(0, leftPct) + '%';
+          el.style.top = Math.max(0, topPct) + '%';
+          el.style.width = Math.min(100, widthPct) + '%';
+          el.style.height = Math.min(100, heightPct) + '%';
+
+          var badge = document.createElement('span');
+          badge.className = 'bubble-badge';
+          var orderText = '#' + (b.readingOrderIndex || (idx + 1));
+          var labelText = b.textType === 'title' ? ' 标题' : (b.textType === 'sfx' ? ' 拟声' : '');
+          badge.innerText = orderText + labelText;
+          el.appendChild(badge);
+
+          el.addEventListener('click', function(e) {
+            e.stopPropagation();
+            sendToParent({
+              type: 'bubblePressed',
+              bubble: b
+            });
+          });
+
+          overlay.appendChild(el);
+        });
+      }
+
       // Tap listener for pagination & menu toggle
       document.addEventListener('click', function(e) {
+        if (e.target && e.target.closest && e.target.closest('.bubble-box')) {
+          return; // 拦截气泡内点击，防止误触发翻页或菜单
+        }
         var width = window.innerWidth || document.documentElement.clientWidth;
         var x = e.clientX;
         if (x < width * 0.28) {
@@ -328,6 +490,21 @@ ${pdfJsCode}
             window.PdfReaderApi.goToProgress(data.progress);
           } else if (data.action === 'applySettings') {
             window.PdfReaderApi.applySettings(data.settings);
+          } else if (data.action === 'setDetectedBubbles') {
+            currentBubbles = data.bubbles || [];
+            isBubbleDetectionActive = Boolean(data.active !== undefined ? data.active : true);
+            renderBubbleOverlay(currentBubbles, isBubbleDetectionActive);
+          } else if (data.action === 'toggleBubbleDetection') {
+            isBubbleDetectionActive = Boolean(data.active);
+            if (isBubbleDetectionActive) {
+              if (currentBubbles && currentBubbles.length > 0) {
+                renderBubbleOverlay(currentBubbles, true);
+              } else {
+                requestDetection();
+              }
+            } else {
+              renderBubbleOverlay([], false);
+            }
           }
         } catch (e) {}
       });

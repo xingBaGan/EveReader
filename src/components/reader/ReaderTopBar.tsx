@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { ChevronLeft, List, Bookmark, Search, SlidersHorizontal } from 'lucide-react-native';
+import { ChevronLeft, List, Bookmark, Search, SlidersHorizontal, MessageSquare } from 'lucide-react-native';
 import { useReaderStore } from '../../stores/useReaderStore';
 import { READER_THEMES } from '../../types/reader';
 
@@ -17,6 +17,8 @@ export function ReaderTopBar() {
   const addBookmark = useReaderStore((s) => s.addBookmark);
   const bookmarks = useReaderStore((s) => s.bookmarks);
   const currentCfi = useReaderStore((s) => s.currentCfi);
+  const isBubbleDetectActive = useReaderStore((s) => s.isBubbleDetectActive);
+  const toggleBubbleDetection = useReaderStore((s) => s.toggleBubbleDetection);
 
   const themeConfig = READER_THEMES[settings.theme] || READER_THEMES.light;
   const isBookmarked = bookmarks.some(
@@ -66,6 +68,19 @@ export function ReaderTopBar() {
             />
           </Pressable>
 
+          {/* 气泡检测快捷切换按钮 */}
+          <Pressable
+            style={[styles.iconBtn, isBubbleDetectActive && styles.activeIconBtn]}
+            onPress={() => toggleBubbleDetection()}
+            hitSlop={8}>
+            <MessageSquare
+              size={20}
+              color={isBubbleDetectActive ? '#38bdf8' : themeConfig.barText}
+              fill={isBubbleDetectActive ? 'rgba(56, 189, 248, 0.2)' : 'none'}
+            />
+            {isBubbleDetectActive ? <View style={styles.activeDot} /> : null}
+          </Pressable>
+
           <Pressable style={styles.iconBtn} onPress={() => setIsSearchOpen(true)}>
             <Search size={20} color={themeConfig.barText} />
           </Pressable>
@@ -105,6 +120,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 20,
+    position: 'relative',
+  },
+  activeIconBtn: {
+    backgroundColor: 'rgba(56, 189, 248, 0.15)',
+  },
+  activeDot: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#38bdf8',
   },
   titleArea: {
     flex: 1,

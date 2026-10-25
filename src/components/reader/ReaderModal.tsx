@@ -22,6 +22,9 @@ import { ReaderBookmarksModal } from './ReaderBookmarksModal';
 import { ReaderSearchModal } from './ReaderSearchModal';
 import { TxtReaderView } from './TxtReaderView';
 import { ReaderWebView, ReaderWebViewRef } from './ReaderWebView';
+import { BubbleFloatingPill } from './BubbleFloatingPill';
+import { BubbleDetailModal } from './BubbleDetailModal';
+import { detectBubblesForPage } from '../../utils/mangaDetector';
 import { READER_BUNDLE_HTML } from './readerTemplate';
 import { PDF_BUNDLE_HTML } from './pdfTemplate';
 import { readBookAsBase64, streamFileToWebView } from '../../utils/fileStorage';
@@ -39,6 +42,13 @@ export function ReaderModal() {
   const onRelocated = useReaderStore((s) => s.onRelocated);
   const setSearchResults = useReaderStore((s) => s.setSearchResults);
   const setIsSearching = useReaderStore((s) => s.setIsSearching);
+  const currentPage = useReaderStore((s) => s.currentPage);
+  const isBubbleDetectActive = useReaderStore((s) => s.isBubbleDetectActive);
+  const toggleBubbleDetection = useReaderStore((s) => s.toggleBubbleDetection);
+  const setIsDetectingBubbles = useReaderStore((s) => s.setIsDetectingBubbles);
+  const setDetectedBubbles = useReaderStore((s) => s.setDetectedBubbles);
+  const selectedBubble = useReaderStore((s) => s.selectedBubble);
+  const setSelectedBubble = useReaderStore((s) => s.setSelectedBubble);
 
   const webViewRef = useRef<ReaderWebViewRef>(null);
   const isStreamingRef = useRef(false);
@@ -210,6 +220,31 @@ export function ReaderModal() {
         setSearchResults(data.results || []);
         break;
 
+      case 'requestBubbleDetection': {
+        const targetPage = data.pageNum || currentPage || 1;
+        setIsDetectingBubbles(true);
+        detectBubblesForPage(targetPage, data.snapshot, data.width, data.height)
+          .then((bubbles) => {
+            setDetectedBubbles(bubbles);
+            setIsDetectingBubbles(false);
+            webViewRef.current?.postMessage('setDetectedBubbles', {
+              bubbles,
+              active: true,
+            });
+          })
+          .catch((err) => {
+            console.warn('[ReaderModal] 气泡检测流程异常:', err);
+            setIsDetectingBubbles(false);
+          });
+        break;
+      }
+
+      case 'bubblePressed':
+        if (data.bubble) {
+          setSelectedBubble(data.bubble);
+        }
+        break;
+
       case 'error':
         setError(data.message || '阅读引擎内部错误');
         break;
@@ -225,6 +260,25 @@ export function ReaderModal() {
       webViewRef.current.postMessage('applySettings', { settings });
     }
   }, [settings, isTxt]);
+
+  // Sync bubble detection state to WebView
+  useEffect(() => {
+    if (isPdf && webViewRef.current) {
+      webViewRef.current.postMessage('toggleBubbleDetection', {
+        active: isBubbleDetectActive,
+      });
+    }
+  }, [isBubbleDetectActive, isPdf]);
+
+  const handleToggleBubbleDetect = () => {
+    toggleBubbleDetection();
+  };
+
+  const handleRefreshBubbleDetect = () => {
+    if (isPdf && webViewRef.current) {
+      webViewRef.current.postMessage('toggleBubbleDetection', { active: true });
+    }
+  };
 
   // Actions passed to UI controls
   const handlePrevChapter = () => {
@@ -319,6 +373,14 @@ export function ReaderModal() {
         {/* Subtle Footer: Battery & Time on Left, Page Count on Right (NeatReader Style) */}
         {!isBarsVisible && !error ? <ReaderFooterBar /> : null}
 
+        {/* 漫画气泡检测快速悬浮胶囊 (1键开启/关闭/状态展示，阅读无阻碍) */}
+        {isPdf && !error ? (
+          <BubbleFloatingPill
+            onToggle={handleToggleBubbleDetect}
+            onRefresh={handleRefreshBubbleDetect}
+          />
+        ) : null}
+
         {/* Bottom Control Bar */}
         {isBarsVisible ? (
           <ReaderBottomBar
@@ -335,6 +397,13 @@ export function ReaderModal() {
         <ReaderSearchModal
           onSearch={handleSearch}
           onSelectResult={handleSelectBookmarkOrSearch}
+        />
+
+        {/* 气泡详情与 OCR 原文查看弹窗 */}
+        <BubbleDetailModal
+          bubble={selectedBubble}
+          visible={selectedBubble != null}
+          onClose={() => setSelectedBubble(null)}
         />
       </View>
     </Modal>

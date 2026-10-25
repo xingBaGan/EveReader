@@ -115,7 +115,9 @@ export const zlibApi = {
    * Fetch direct download CDN link for a book
    */
   async getDownloadLink(id: number, hash: string): Promise<ZLibFileListing> {
-    const response = await apiClient.get<ZLibFileListing>(`/eapi/book/${id}/${hash}/file`);
+    const response = await apiClient.get<ZLibFileListing>(`/eapi/book/${id}/${hash}/file`, {
+      validateStatus: (status) => status < 500,
+    });
     return response.data;
   },
 
@@ -172,7 +174,10 @@ export const zlibApi = {
     type: 'email' | 'kindle'
   ): Promise<{ success: number; message?: string; error?: string }> {
     const response = await apiClient.get<{ success: number; message?: string; error?: string }>(
-      `/eapi/book/${id}/${hash}/send-to-${type}`
+      `/eapi/book/${id}/${hash}/send-to-${type}`,
+      {
+        validateStatus: (status) => status < 500,
+      }
     );
     return response.data;
   },

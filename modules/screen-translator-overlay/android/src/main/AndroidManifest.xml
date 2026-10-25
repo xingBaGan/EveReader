@@ -1,0 +1,38 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+  <!-- 悬浮窗权限（用于在第三方漫画、浏览器等应用上方显示悬浮球和翻译结果） -->
+  <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+  <!-- 前台服务权限（确保在第三方应用界面时屏幕捕获与悬浮窗持续运行） -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <!-- Android 14+ 要求指定 mediaProjection 对应的前台服务类型权限 -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+  <!-- Android 13+ 前台服务常驻通知权限 -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+  <!-- 用于检测前台应用切换（当指定目标应用时，离开应用立即销毁屏幕文字） -->
+  <uses-permission
+      android:name="android.permission.PACKAGE_USAGE_STATS"
+      tools:ignore="ProtectedPermissions" />
+
+  <application>
+    <!-- 悬浮窗与屏幕捕获核心前台服务 -->
+    <service
+      android:name=".ScreenCaptureOverlayService"
+      android:enabled="true"
+      android:exported="false"
+      android:foregroundServiceType="mediaProjection" />
+
+    <!-- 透明授权辅助 Activity，用于弹出 MediaProjection 屏幕录制/截屏确认弹窗 -->
+    <activity
+      android:name=".ScreenCapturePermissionActivity"
+      android:theme="@android:style/Theme.Translucent.NoTitleBar"
+      android:exported="false"
+      android:excludeFromRecents="true"
+      android:launchMode="singleTop"
+      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
+  </application>
+
+</manifest>
