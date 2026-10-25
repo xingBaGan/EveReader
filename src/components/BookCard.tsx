@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, Pressable, ActivityIndicator } from 'react-nati
 import { Image } from 'expo-image';
 import { ZLibBook } from '../types/zlib';
 import { useDownloadStore } from '../stores/useDownloadStore';
-import { Download, Check, BookOpen } from 'lucide-react-native';
+import { Download, BookOpen } from 'lucide-react-native';
 
 interface BookCardProps {
   book: ZLibBook;
@@ -13,7 +13,7 @@ interface BookCardProps {
 export function BookCard({ book, onPress }: BookCardProps) {
   const task = useDownloadStore((s) => s.tasks[book.id]);
   const startDownload = useDownloadStore((s) => s.startDownload);
-  const openExternal = useDownloadStore((s) => s.openFileWithExternalReader);
+  const openBookInReader = useDownloadStore((s) => s.openBookInReader);
 
   const isDownloading = task?.status === 'downloading';
   const isCompleted = task?.status === 'completed';
@@ -21,14 +21,24 @@ export function BookCard({ book, onPress }: BookCardProps) {
   const handleAction = async (e: any) => {
     e.stopPropagation();
     if (isCompleted) {
-      await openExternal(book.id);
+      openBookInReader(book.id);
     } else {
       await startDownload(book);
     }
   };
 
+  const handleCardPress = () => {
+    if (onPress) {
+      onPress();
+    } else if (isCompleted) {
+      openBookInReader(book.id);
+    } else {
+      startDownload(book);
+    }
+  };
+
   return (
-    <Pressable style={styles.card} onPress={onPress}>
+    <Pressable style={styles.card} onPress={handleCardPress}>
       <Image
         source={{ uri: book.cover }}
         style={styles.cover}
@@ -80,8 +90,8 @@ export function BookCard({ book, onPress }: BookCardProps) {
               </View>
             ) : isCompleted ? (
               <View style={styles.btnContent}>
-                <Check size={14} color="#10b981" />
-                <Text style={[styles.btnText, { color: '#10b981' }]}>已下载</Text>
+                <BookOpen size={14} color="#10b981" />
+                <Text style={[styles.btnText, { color: '#10b981' }]}>阅读</Text>
               </View>
             ) : (
               <View style={styles.btnContent}>
@@ -101,14 +111,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     backgroundColor: '#1e293b',
     borderRadius: 12,
-    padding: 12,
-    marginVertical: 6,
     marginHorizontal: 16,
+    marginVertical: 6,
+    padding: 12,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 4,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
   },
   cover: {
     width: 72,
@@ -122,14 +132,14 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   title: {
-    fontSize: 15,
-    fontWeight: '600',
     color: '#f8fafc',
+    fontSize: 15,
+    fontWeight: '700',
     lineHeight: 20,
   },
   author: {
-    fontSize: 13,
     color: '#94a3b8',
+    fontSize: 12,
     marginTop: 2,
   },
   tagRow: {
@@ -145,16 +155,16 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   formatBadge: {
-    backgroundColor: '#2563eb',
+    backgroundColor: '#0369a1',
   },
   formatText: {
-    fontSize: 11,
-    fontWeight: '700',
     color: '#ffffff',
+    fontSize: 10,
+    fontWeight: '700',
   },
   badgeText: {
-    fontSize: 11,
     color: '#cbd5e1',
+    fontSize: 10,
   },
   actionRow: {
     flexDirection: 'row',
@@ -163,24 +173,26 @@ const styles = StyleSheet.create({
   },
   downloadBtn: {
     backgroundColor: '#0284c7',
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
     paddingVertical: 6,
-    borderRadius: 6,
+    borderRadius: 8,
   },
   downloadingBtn: {
-    backgroundColor: '#0369a1',
+    backgroundColor: '#475569',
   },
   completedBtn: {
-    backgroundColor: '#064e3b',
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.4)',
   },
   btnContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 6,
   },
   btnText: {
-    color: '#fff',
+    color: '#ffffff',
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '700',
   },
 });

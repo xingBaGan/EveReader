@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,9 @@ import {
   FlatList,
   Pressable,
   ActivityIndicator,
+  Alert,
+  ActionSheetIOS,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useQuery } from '@tanstack/react-query';
@@ -14,32 +17,57 @@ import { zlibApi } from '../api/endpoints';
 import { BookCard } from '../components/BookCard';
 import { useDownloadStore } from '../stores/useDownloadStore';
 import { useAuthStore } from '../stores/useAuthStore';
-import { History, Bookmark, HardDrive, ExternalLink } from 'lucide-react-native';
+import { useBookshelfStore } from '../stores/useBookshelfStore';
+import { useReaderStore } from '../stores/useReaderStore';
+import { BookshelfItem } from '../types/reader';
+import { pickLocalBookFile } from '../utils/filePicker';
+import * as Sharing from 'expo-sharing';
+import {
+  History,
+  Bookmark,
+  Library,
+  LayoutGrid,
+  List as ListIcon,
+  Plus,
+  BookOpen,
+  MoreVertical,
+  CheckCircle,
+} from 'lucide-react-native';
 
 export default function ShelfScreen() {
-  const [activeTab, setActiveTab] = useState<'cloud_downloaded' | 'saved' | 'local'>('cloud_downloaded');
+  const [activeTab, setActiveTab] = useState<'bookshelf' | 'cloud_downloaded' | 'saved'>('bookshelf');
   const user = useAuthStore((s) => s.user);
-  const tasks = useDownloadStore((s) => s.tasks);
-  const openExternal = useDownloadStore((s) => s.openFileWithExternalReader);
 
-  const localDownloadedList = Object.values(tasks).filter((t) => t.status === 'completed');
+  const bookshelfBooks = useBookshelfStore((s) => s.books);
+  const viewMode = useBookshelfStore((s) => s.viewMode);
+  const setViewMode = useBookshelfStore((s) => s.setViewMode);
+  const sortBy = useBookshelfStore((s) => s.sortBy);
+  const setSortBy = useBookshelfStore((s) => s.setSortBy);
+  const filterFormat = useBookshelfStore((s) => s.filterFormat);
+  const setFilterFormat = useBookshelfStore((s) => s.setFilterFormat);
+  const loadBookshelf = useBookshelfStore((s) => s.loadBookshelf);
+  const importLocalBook = useBookshelfStore((s) => s.importLocalBook);
+  const removeBook = useBookshelfStore((s) => s.removeBook);
+  const openReader = useReaderStore((s) => s.openReader);
 
-  // 1. Fetch Cloud Account Download History (/eapi/user/book/downloaded)
+  useEffect(() => {
+    loadBookshelf();
+  }, []);
+
+  // 1. Fetch Cloud Account Download History
   const {
     data: cloudDownloadedData,
     isLoading: isLoadingCloudDl,
-    refetch: refetchCloudDl,
   } = useQuery({
     queryKey: ['cloudDownloadedBooks', user?.id],
     queryFn: () => zlibApi.getDownloadedBooks(1, 30),
     enabled: activeTab === 'cloud_downloaded' && !!user,
   });
 
-  // 2. Fetch Cloud Saved / Favorites (/eapi/user/book/saved)
+  // 2. Fetch Cloud Saved / Favorites
   const {
     data: savedData,
     isLoading: isLoadingSaved,
-    refetch: refetchSaved,
   } = useQuery({
     queryKey: ['savedBooks', user?.id],
     queryFn: () => zlibApi.getSavedBooks(1, 30),
@@ -49,24 +77,133 @@ export default function ShelfScreen() {
   const cloudDownloadedBooks = cloudDownloadedData?.books || [];
   const savedBooks = savedData?.books || [];
 
+  // Filter and sort bookshelf books
+  const allBooksList = Object.values(bookshelfBooks);
+  const filteredBooks = allBooksList.filter((b) => {
+    if (filterFormat === 'all') return true;
+    return b.extension.toLowerCase() === filterFormat;
+  });
+
+  const sortedBooks = [...filteredBooks].sort((a, b) => {
+    if (sortBy === 'recent') {
+      return (b.lastReadTime || 0) - (a.lastReadTime || 0);
+    }
+    if (sortBy === 'progress') {
+      return (b.progress || 0) - (a.progress || 0);
+    }
+    if (sortBy === 'dateAdded') {
+      return (b.dateAdded || 0) - (a.dateAdded || 0);
+    }
+    if (sortBy === 'title') {
+      return a.title.localeCompare(b.title, 'zh-CN');
+    }
+    return 0;
+  });
+
+  const completedCount = allBooksList.filter((b) => b.progress >= 99).length;
+
+  // Handle local book import
+  const handleImportBook = async () => {
+    try {
+      const file = await pickLocalBookFile();
+      if (!file) return;
+
+      const newBook = await importLocalBook(file.name, file.uri, file.size);
+      Alert.alert('导入成功', `已添加《${newBook.title}》至书架`, [
+        { text: '稍后阅读', style: 'cancel' },
+        { text: '立即阅读', onPress: () => openReader(newBook) },
+      ]);
+    } catch (e: any) {
+      Alert.alert('导入失败', e.message || '选取文件出错');
+    }
+  };
+
+  const handleBookOptions = (book: BookshelfItem) => {
+    const options = ['开始阅读', '分享文件', '从书架移除', '取消'];
+    const destructiveIndex = 2;
+    const cancelIndex = 3;
+
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options,
+          destructiveButtonIndex: destructiveIndex,
+          cancelButtonIndex: cancelIndex,
+          title: book.title,
+        },
+        (buttonIndex) => {
+          if (buttonIndex === 0) openReader(book);
+          if (buttonIndex === 1 && book.localUri) Sharing.shareAsync(book.localUri);
+          if (buttonIndex === 2) removeBook(book.id);
+        }
+      );
+    } else {
+      Alert.alert(book.title, '选择操作', [
+        { text: '开始阅读', onPress: () => openReader(book) },
+        {
+          text: '分享文件',
+          onPress: () => {
+            if (book.localUri) Sharing.shareAsync(book.localUri);
+          },
+        },
+        {
+          text: '从书架移除',
+          style: 'destructive',
+          onPress: () => removeBook(book.id),
+        },
+        { text: '取消', style: 'cancel' },
+      ]);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      {/* Header */}
+      {/* Top Header */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>书架与借阅</Text>
-        <Text style={styles.headerSubtitle}>
-          {user ? `已连接账号: ${user.name || user.email}` : '登录账号即可同步云端下载记录与收藏'}
-        </Text>
+        <View style={styles.headerTitleArea}>
+          <Text style={styles.headerTitle}>书架与借阅</Text>
+          <Text style={styles.headerSubtitle}>
+            共 {allBooksList.length} 本图书 · 已读完 {completedCount} 本
+          </Text>
+        </View>
+
+        <View style={styles.headerActions}>
+          <Pressable style={styles.actionBtn} onPress={handleImportBook}>
+            <Plus size={16} color="#38bdf8" />
+            <Text style={styles.actionBtnText}>导入</Text>
+          </Pressable>
+
+          {activeTab === 'bookshelf' ? (
+            <Pressable
+              style={styles.iconBtn}
+              onPress={() => setViewMode(viewMode === 'grid' ? 'list' : 'grid')}>
+              {viewMode === 'grid' ? (
+                <ListIcon size={18} color="#94a3b8" />
+              ) : (
+                <LayoutGrid size={18} color="#94a3b8" />
+              )}
+            </Pressable>
+          ) : null}
+        </View>
       </View>
 
       {/* Tabs */}
       <View style={styles.tabContainer}>
         <Pressable
+          style={[styles.tabBtn, activeTab === 'bookshelf' && styles.tabBtnActive]}
+          onPress={() => setActiveTab('bookshelf')}>
+          <Library size={13} color={activeTab === 'bookshelf' ? '#fff' : '#94a3b8'} />
+          <Text style={[styles.tabText, activeTab === 'bookshelf' && styles.tabTextActive]}>
+            我的书架 ({allBooksList.length})
+          </Text>
+        </Pressable>
+
+        <Pressable
           style={[styles.tabBtn, activeTab === 'cloud_downloaded' && styles.tabBtnActive]}
           onPress={() => setActiveTab('cloud_downloaded')}>
           <History size={13} color={activeTab === 'cloud_downloaded' ? '#fff' : '#94a3b8'} />
           <Text style={[styles.tabText, activeTab === 'cloud_downloaded' && styles.tabTextActive]}>
-            账号下载历史
+            云端下载
           </Text>
         </Pressable>
 
@@ -78,19 +215,226 @@ export default function ShelfScreen() {
             线上收藏
           </Text>
         </Pressable>
-
-        <Pressable
-          style={[styles.tabBtn, activeTab === 'local' && styles.tabBtnActive]}
-          onPress={() => setActiveTab('local')}>
-          <HardDrive size={13} color={activeTab === 'local' ? '#fff' : '#94a3b8'} />
-          <Text style={[styles.tabText, activeTab === 'local' && styles.tabTextActive]}>
-            本地离线 ({localDownloadedList.length})
-          </Text>
-        </Pressable>
       </View>
 
-      {/* Content */}
-      {activeTab === 'cloud_downloaded' ? (
+      {/* Bookshelf Tab Content */}
+      {activeTab === 'bookshelf' ? (
+        <View style={styles.contentContainer}>
+          {/* Filter & Sort Bar */}
+          <View style={styles.filterBar}>
+            <View style={styles.formatChips}>
+              {(['all', 'epub', 'txt', 'pdf'] as const).map((fmt) => (
+                <Pressable
+                  key={fmt}
+                  style={[
+                    styles.chip,
+                    filterFormat === fmt && styles.chipActive,
+                  ]}
+                  onPress={() => setFilterFormat(fmt)}>
+                  <Text
+                    style={[
+                      styles.chipText,
+                      filterFormat === fmt && styles.chipTextActive,
+                    ]}>
+                    {fmt === 'all' ? '全部' : fmt.toUpperCase()}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+
+            {/* Sort Selector */}
+            <Pressable
+              style={styles.sortBtn}
+              onPress={() => {
+                const sorts: ('recent' | 'progress' | 'title' | 'dateAdded')[] = [
+                  'recent',
+                  'progress',
+                  'dateAdded',
+                  'title',
+                ];
+                const nextIdx = (sorts.indexOf(sortBy) + 1) % sorts.length;
+                setSortBy(sorts[nextIdx]);
+              }}>
+              <Text style={styles.sortBtnText}>
+                {sortBy === 'recent'
+                  ? '最近阅读'
+                  : sortBy === 'progress'
+                  ? '阅读进度'
+                  : sortBy === 'dateAdded'
+                  ? '添加时间'
+                  : '书名排序'}
+              </Text>
+            </Pressable>
+          </View>
+
+          {/* Book List / Grid */}
+          {sortedBooks.length === 0 ? (
+            <View style={styles.centerBox}>
+              <Library size={48} color="#334155" />
+              <Text style={styles.emptyTitle}>书架空空如也</Text>
+              <Text style={styles.emptySubtitle}>
+                你可以点击右上角「+ 导入」本地 EPUB/TXT，或在「发现」「搜索」中下载图书
+              </Text>
+              <Pressable style={styles.importEmptyBtn} onPress={handleImportBook}>
+                <Plus size={16} color="#fff" />
+                <Text style={styles.importEmptyBtnText}>导入本地图书文件</Text>
+              </Pressable>
+            </View>
+          ) : viewMode === 'grid' ? (
+            /* NeatReader Grid View */
+            <FlatList
+              key="grid-view"
+              data={sortedBooks}
+              numColumns={2}
+              keyExtractor={(item) => `shelf-grid-${item.id}`}
+              contentContainerStyle={styles.gridContent}
+              renderItem={({ item }) => (
+                <Pressable
+                  style={styles.gridCard}
+                  onPress={() => openReader(item)}
+                  onLongPress={() => handleBookOptions(item)}>
+                  <View style={styles.gridCoverWrapper}>
+                    {item.cover ? (
+                      <Image
+                        source={{ uri: item.cover }}
+                        style={styles.gridCover}
+                        contentFit="cover"
+                      />
+                    ) : (
+                      <View style={styles.gridCoverFallback}>
+                        <BookOpen size={32} color="#64748b" />
+                        <Text style={styles.gridCoverFallbackTitle} numberOfLines={2}>
+                          {item.title}
+                        </Text>
+                      </View>
+                    )}
+
+                    {/* Format Badge */}
+                    <View
+                      style={[
+                        styles.gridFormatBadge,
+                        item.extension === 'pdf'
+                          ? styles.pdfBadge
+                          : item.extension === 'txt'
+                          ? styles.txtBadge
+                          : styles.epubBadge,
+                      ]}>
+                      <Text style={styles.gridFormatText}>
+                        {item.extension.toUpperCase()}
+                      </Text>
+                    </View>
+
+                    {/* Progress Bar Over Cover */}
+                    <View style={styles.gridProgressContainer}>
+                      <View
+                        style={[
+                          styles.gridProgressFill,
+                          { width: `${Math.min(100, Math.max(0, item.progress))}%` },
+                        ]}
+                      />
+                    </View>
+                  </View>
+
+                  <View style={styles.gridInfo}>
+                    <Text style={styles.gridTitle} numberOfLines={2}>
+                      {item.title}
+                    </Text>
+                    <View style={styles.gridBottomRow}>
+                      <Text style={styles.gridProgressText}>
+                        {item.progress >= 99 ? (
+                          <Text style={{ color: '#10b981' }}>已读完</Text>
+                        ) : item.progress > 0 ? (
+                          `${item.progress.toFixed(0)}%`
+                        ) : (
+                          '未读'
+                        )}
+                      </Text>
+                      <Pressable
+                        style={styles.gridMoreBtn}
+                        onPress={() => handleBookOptions(item)}>
+                        <MoreVertical size={14} color="#64748b" />
+                      </Pressable>
+                    </View>
+                  </View>
+                </Pressable>
+              )}
+            />
+          ) : (
+            /* NeatReader Detailed List View */
+            <FlatList
+              key="list-view"
+              data={sortedBooks}
+              keyExtractor={(item) => `shelf-list-${item.id}`}
+              contentContainerStyle={styles.listContent}
+              renderItem={({ item }) => (
+                <Pressable
+                  style={styles.localCard}
+                  onPress={() => openReader(item)}
+                  onLongPress={() => handleBookOptions(item)}>
+                  <View style={styles.listCoverWrapper}>
+                    {item.cover ? (
+                      <Image
+                        source={{ uri: item.cover }}
+                        style={styles.localCover}
+                        contentFit="cover"
+                      />
+                    ) : (
+                      <View style={[styles.localCover, styles.gridCoverFallback]}>
+                        <BookOpen size={20} color="#64748b" />
+                      </View>
+                    )}
+                  </View>
+
+                  <View style={styles.localInfo}>
+                    <Text style={styles.localTitle} numberOfLines={2}>
+                      {item.title}
+                    </Text>
+
+                    <Text style={styles.localAuthor} numberOfLines={1}>
+                      {item.author || '未知作者'}
+                    </Text>
+
+                    {/* Progress Bar */}
+                    <View style={styles.listProgressBar}>
+                      <View
+                        style={[
+                          styles.listProgressFill,
+                          { width: `${Math.min(100, Math.max(0, item.progress))}%` },
+                        ]}
+                      />
+                    </View>
+
+                    <View style={styles.localMeta}>
+                      <View
+                        style={[
+                          styles.extBadge,
+                          item.extension === 'pdf'
+                            ? styles.pdfBadge
+                            : item.extension === 'txt'
+                            ? styles.txtBadge
+                            : styles.epubBadge,
+                        ]}>
+                        <Text style={styles.extText}>{item.extension.toUpperCase()}</Text>
+                      </View>
+                      <Text style={styles.localSize}>
+                        {item.progress >= 99 ? '已读完' : `已读 ${item.progress.toFixed(0)}%`}
+                      </Text>
+                      {item.filesizeString ? (
+                        <Text style={styles.localSize}>{item.filesizeString}</Text>
+                      ) : null}
+                    </View>
+                  </View>
+
+                  <View style={styles.openBtn}>
+                    <BookOpen size={14} color="#38bdf8" />
+                    <Text style={styles.openBtnText}>阅读</Text>
+                  </View>
+                </Pressable>
+              )}
+            />
+          )}
+        </View>
+      ) : activeTab === 'cloud_downloaded' ? (
         !user ? (
           <View style={styles.centerBox}>
             <History size={48} color="#334155" />
@@ -117,7 +461,8 @@ export default function ShelfScreen() {
             }
           />
         )
-      ) : activeTab === 'saved' ? (
+      ) : (
+        /* Saved / Favorites */
         !user ? (
           <View style={styles.centerBox}>
             <Bookmark size={48} color="#334155" />
@@ -142,47 +487,6 @@ export default function ShelfScreen() {
             }
           />
         )
-      ) : (
-        /* Local tab */
-        localDownloadedList.length === 0 ? (
-          <View style={styles.centerBox}>
-            <HardDrive size={48} color="#334155" />
-            <Text style={styles.emptyTitle}>暂无本地离线文件</Text>
-            <Text style={styles.emptySubtitle}>在本应用中下载完成的图书文件会保存在这里，可直接点击打开</Text>
-          </View>
-        ) : (
-          <FlatList
-            data={localDownloadedList}
-            keyExtractor={(item) => `local-${item.bookId}`}
-            contentContainerStyle={styles.listContent}
-            renderItem={({ item }) => (
-              <Pressable
-                style={styles.localCard}
-                onPress={() => openExternal(item.bookId)}>
-                <Image
-                  source={{ uri: item.cover }}
-                  style={styles.localCover}
-                  contentFit="cover"
-                />
-                <View style={styles.localInfo}>
-                  <Text style={styles.localTitle} numberOfLines={2}>
-                    {item.title}
-                  </Text>
-                  <View style={styles.localMeta}>
-                    <View style={styles.extBadge}>
-                      <Text style={styles.extText}>{item.extension.toUpperCase()}</Text>
-                    </View>
-                    <Text style={styles.localSize}>{item.filesizeString}</Text>
-                  </View>
-                </View>
-                <View style={styles.openBtn}>
-                  <ExternalLink size={16} color="#38bdf8" />
-                  <Text style={styles.openBtnText}>打开</Text>
-                </View>
-              </Pressable>
-            )}
-          />
-        )
       )}
     </SafeAreaView>
   );
@@ -193,10 +497,19 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0f172a',
   },
+  contentContainer: {
+    flex: 1,
+  },
   header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     paddingHorizontal: 16,
     paddingTop: 12,
     paddingBottom: 6,
+  },
+  headerTitleArea: {
+    flex: 1,
   },
   headerTitle: {
     fontSize: 22,
@@ -207,6 +520,30 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#94a3b8',
     marginTop: 2,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  actionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(56, 189, 248, 0.15)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  actionBtnText: {
+    color: '#38bdf8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  iconBtn: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: '#1e293b',
   },
   tabContainer: {
     flexDirection: 'row',
@@ -237,21 +574,162 @@ const styles = StyleSheet.create({
   tabTextActive: {
     color: '#ffffff',
   },
+  filterBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    marginBottom: 8,
+  },
+  formatChips: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  chip: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    backgroundColor: '#1e293b',
+  },
+  chipActive: {
+    backgroundColor: '#0284c7',
+  },
+  chipText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  chipTextActive: {
+    color: '#ffffff',
+  },
+  sortBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    backgroundColor: '#1e293b',
+  },
+  sortBtnText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  gridContent: {
+    paddingHorizontal: 10,
+    paddingBottom: 90,
+  },
+  gridCard: {
+    flex: 1,
+    margin: 6,
+    backgroundColor: '#1e293b',
+    borderRadius: 12,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  gridCoverWrapper: {
+    width: '100%',
+    aspectRatio: 0.72,
+    position: 'relative',
+    backgroundColor: '#334155',
+  },
+  gridCover: {
+    width: '100%',
+    height: '100%',
+  },
+  gridCoverFallback: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 12,
+    backgroundColor: '#1e293b',
+  },
+  gridCoverFallbackTitle: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  gridFormatBadge: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  epubBadge: {
+    backgroundColor: '#0284c7',
+  },
+  txtBadge: {
+    backgroundColor: '#8b5cf6',
+  },
+  pdfBadge: {
+    backgroundColor: '#ef4444',
+  },
+  gridFormatText: {
+    color: '#fff',
+    fontSize: 9,
+    fontWeight: '800',
+  },
+  gridProgressContainer: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 3,
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+  },
+  gridProgressFill: {
+    height: '100%',
+    backgroundColor: '#38bdf8',
+  },
+  gridInfo: {
+    padding: 10,
+  },
+  gridTitle: {
+    color: '#f8fafc',
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+    minHeight: 36,
+  },
+  gridBottomRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  gridProgressText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  gridMoreBtn: {
+    padding: 4,
+  },
   listContent: {
-    paddingBottom: 80,
+    paddingBottom: 90,
   },
   localCard: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#1e293b',
     marginHorizontal: 16,
-    marginVertical: 6,
+    marginVertical: 5,
     padding: 12,
     borderRadius: 12,
   },
+  listCoverWrapper: {
+    position: 'relative',
+  },
   localCover: {
-    width: 48,
-    height: 68,
+    width: 52,
+    height: 74,
     borderRadius: 6,
     backgroundColor: '#334155',
   },
@@ -262,17 +740,33 @@ const styles = StyleSheet.create({
   localTitle: {
     color: '#f8fafc',
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: '700',
     lineHeight: 18,
+  },
+  localAuthor: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  listProgressBar: {
+    height: 4,
+    backgroundColor: '#334155',
+    borderRadius: 2,
+    overflow: 'hidden',
+    marginTop: 6,
+    marginBottom: 4,
+  },
+  listProgressFill: {
+    height: '100%',
+    backgroundColor: '#0284c7',
   },
   localMeta: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginTop: 6,
+    marginTop: 2,
   },
   extBadge: {
-    backgroundColor: '#2563eb',
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
@@ -291,14 +785,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
     backgroundColor: '#0f172a',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 8,
   },
   openBtnText: {
     color: '#38bdf8',
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   centerBox: {
     flex: 1,
@@ -309,7 +803,7 @@ const styles = StyleSheet.create({
   emptyTitle: {
     color: '#e2e8f0',
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: '700',
     marginTop: 12,
   },
   emptySubtitle: {
@@ -318,6 +812,22 @@ const styles = StyleSheet.create({
     marginTop: 6,
     lineHeight: 18,
     textAlign: 'center',
+    paddingHorizontal: 20,
+  },
+  importEmptyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#0284c7',
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 10,
+    marginTop: 20,
+  },
+  importEmptyBtnText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '700',
   },
   loadingText: {
     color: '#94a3b8',

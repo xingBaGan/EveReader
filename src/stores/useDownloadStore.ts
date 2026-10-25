@@ -4,6 +4,8 @@ import * as Sharing from 'expo-sharing';
 import { Platform, Alert } from 'react-native';
 import { zlibApi } from '../api/endpoints';
 import { ZLibBook } from '../types/zlib';
+import { useBookshelfStore } from './useBookshelfStore';
+import { useReaderStore } from './useReaderStore';
 
 export interface DownloadTask {
   bookId: number;
@@ -22,6 +24,7 @@ interface DownloadStoreState {
   tasks: Record<number, DownloadTask>;
   startDownload: (book: ZLibBook) => Promise<string | undefined>;
   openFileWithExternalReader: (bookId: number) => Promise<void>;
+  openBookInReader: (bookId: number) => void;
 }
 
 export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
@@ -30,7 +33,7 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
   startDownload: async (book: ZLibBook) => {
     const existing = get().tasks[book.id];
     if (existing && existing.status === 'completed' && existing.localUri) {
-      await get().openFileWithExternalReader(book.id);
+      get().openBookInReader(book.id);
       return existing.localUri;
     }
 
@@ -58,11 +61,8 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
         throw new Error('未获取到有效下载链接');
       }
 
-      // Web platform fallback: direct download via link
+      // Web platform fallback: direct download or local blob
       if (Platform.OS === 'web') {
-        if (typeof window !== 'undefined') {
-          window.open(dlLink, '_blank');
-        }
         set((state) => ({
           tasks: {
             ...state.tasks,
@@ -70,9 +70,25 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
               ...state.tasks[book.id],
               progress: 100,
               status: 'completed',
+              localUri: dlLink,
             },
           },
         }));
+
+        // Add to bookshelf
+        await useBookshelfStore.getState().addOrUpdateBook({
+          id: book.id,
+          title: book.title,
+          author: book.author,
+          cover: book.cover,
+          extension: book.extension,
+          filesizeString: book.filesizeString,
+          localUri: dlLink,
+          source: 'download',
+        });
+
+        // Open in reader
+        get().openBookInReader(book.id);
         return dlLink;
       }
 
@@ -96,16 +112,29 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
         },
       }));
 
-      // Automatically open sharing dialog for external readers
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(localUri);
-      }
+      // Add to bookshelf store automatically
+      await useBookshelfStore.getState().addOrUpdateBook({
+        id: book.id,
+        title: book.title,
+        author: book.author,
+        cover: book.cover,
+        extension: book.extension,
+        filesizeString: book.filesizeString,
+        localUri,
+        source: 'download',
+      });
+
+      // Automatically launch built-in reader
+      get().openBookInReader(book.id);
 
       return localUri;
     } catch (err: any) {
       console.error('Download error:', err);
       const msg = err.response?.data?.error || err.message || '下载失败';
-      if (err.response?.status === 403 || (typeof msg === 'string' && msg.toLowerCase().includes('login'))) {
+      if (
+        err.response?.status === 403 ||
+        (typeof msg === 'string' && msg.toLowerCase().includes('login'))
+      ) {
         Alert.alert('需要登录', '下载书籍需要登录 Z-Library 账号，请在「我的」页面登录后重试。');
       } else {
         Alert.alert('下载失败', String(msg));
@@ -121,6 +150,28 @@ export const useDownloadStore = create<DownloadStoreState>((set, get) => ({
         },
       }));
       return undefined;
+    }
+  },
+
+  openBookInReader: (bookId: number) => {
+    const task = get().tasks[bookId];
+    if (task && task.localUri) {
+      const bookshelfBook = useBookshelfStore.getState().books[bookId];
+      if (bookshelfBook) {
+        useReaderStore.getState().openReader(bookshelfBook);
+      } else {
+        useReaderStore.getState().openReader({
+          id: task.bookId,
+          title: task.title,
+          cover: task.cover,
+          extension: task.extension,
+          filesizeString: task.filesizeString,
+          localUri: task.localUri,
+          dateAdded: Date.now(),
+          progress: 0,
+          source: 'download',
+        });
+      }
     }
   },
 
