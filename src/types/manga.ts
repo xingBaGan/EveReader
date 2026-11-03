@@ -7,6 +7,12 @@ export interface BoundingBox {
 
 export type ComicTextType = 'bubble' | 'free_text' | 'title' | 'sfx';
 
+export interface CharBoxItem {
+  char: string;
+  score: number;
+  box: [number, number, number, number]; // [x0, y0, x1, y1] 页面绝对像素坐标
+}
+
 export interface TextBubble {
   id: string;
   box: BoundingBox;
@@ -28,6 +34,7 @@ export interface TextBubble {
   lines?: string[];
   overlapOpacity?: number;
   isOverlapping?: boolean;
+  chars?: CharBoxItem[];
 }
 
 export interface MangaPage {

@@ -176,6 +176,7 @@ class ScreenTranslatorOverlayModule : Module() {
     AsyncFunction("recognizeImage") { imageUri: String, lang: String?, promise: Promise ->
       val context = appContext.reactContext
       if (context == null) {
+        android.util.Log.e("BubbleOCR", "[ERROR_OR_CANCEL] React Context is null")
         promise.reject("CONTEXT_NULL", "React Context 不可用", null)
         return@AsyncFunction
       }
@@ -183,6 +184,7 @@ class ScreenTranslatorOverlayModule : Module() {
       CoroutineScope(Dispatchers.IO).launch {
         var bitmap: Bitmap? = null
         try {
+          android.util.Log.i("BubbleOCR", "[NATIVE_CALL_START] uriLen=${imageUri.length}, isBase64=${imageUri.startsWith("data:")}, lang=$lang")
           // 稳健支持 base64, content://, file:// 及本地绝对路径
           bitmap = try {
             if (imageUri.startsWith("data:") && imageUri.contains("base64,")) {
@@ -213,11 +215,13 @@ class ScreenTranslatorOverlayModule : Module() {
           }
 
           if (bitmap == null) {
+            android.util.Log.e("BubbleOCR", "[ERROR_OR_CANCEL] decode failed for uri length ${imageUri.length}")
             promise.reject("DECODE_FAILED", "无法解码指定图片: $imageUri", null)
             return@launch
           }
 
           val bubbles = MangaOcrProcessor.processImage(bitmap, lang ?: "ja", context = context)
+          android.util.Log.i("BubbleOCR", "[FINAL_RESULTS] MangaOcrProcessor returned ${bubbles.size} bubbles for ${bitmap.width}x${bitmap.height}")
           val response = mapOf(
             "width" to bitmap.width,
             "height" to bitmap.height,
@@ -225,6 +229,7 @@ class ScreenTranslatorOverlayModule : Module() {
           )
           promise.resolve(response)
         } catch (e: Exception) {
+          android.util.Log.e("BubbleOCR", "[ERROR_OR_CANCEL] recognizeImage error: ${e.message}", e)
           promise.reject("OCR_ERROR", e.message ?: "文字定位识别发生异常", e)
         } finally {
           try {

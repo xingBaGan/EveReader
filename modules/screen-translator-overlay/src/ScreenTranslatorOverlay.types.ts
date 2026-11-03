@@ -7,6 +7,12 @@ export interface OverlayBubbleBox {
 
 export type ComicTextType = 'bubble' | 'free_text' | 'title' | 'sfx';
 
+export interface CharBoxItem {
+  char: string;
+  score: number;
+  box: [number, number, number, number]; // [x0, y0, x1, y1] 页面绝对像素坐标
+}
+
 export interface OverlayBubbleItem {
   id: string;
   box: OverlayBubbleBox;
@@ -23,6 +29,7 @@ export interface OverlayBubbleItem {
   columnCount?: number;
   lines?: string[];
   confidence?: number;
+  chars?: CharBoxItem[];
 }
 
 export interface RecognizeImageResult {

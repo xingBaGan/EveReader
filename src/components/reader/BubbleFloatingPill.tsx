@@ -41,7 +41,10 @@ export const BubbleFloatingPill: React.FC<BubbleFloatingPillProps> = ({
             styles.pillInactive,
             pressed && styles.pillPressed,
           ]}
-          onPress={onToggle}>
+          onPress={() => {
+            console.log('[BubbleOCR] [JS_CLICK_ENTRY] BubbleFloatingPill button pressed to activate detection');
+            onToggle();
+          }}>
           <MessageSquare size={14} color="#94a3b8" />
           <Text style={styles.textInactive}>气泡检测</Text>
         </Pressable>

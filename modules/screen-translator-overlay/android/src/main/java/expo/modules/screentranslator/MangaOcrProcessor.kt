@@ -338,7 +338,10 @@ object MangaOcrProcessor {
           val overlapRatio = if (minArea > 0f) inter / minArea else 0f
           val iou = computeIoU(rA, rB)
 
-          if (iou > 0.20f || overlapRatio > 0.35f) {
+          val typeA = bA["textType"] as? String ?: ""
+          val typeB = bB["textType"] as? String ?: ""
+          val isDuplicate = (typeA == typeB) && (iou > 0.60f || overlapRatio > 0.75f)
+          if (isDuplicate) {
             val unionRect = Rect(
               min(rA.left, rB.left),
               min(rA.top, rB.top),
@@ -583,7 +586,7 @@ object MangaOcrProcessor {
       // 7. 方法 2 核心：漫画专用端侧深度学习检测器融合 (ComicTextDetector - 分类别动态置信度)
       // 专门检出常规 OCR 漏检的艺术字、拟声词 (SFX) 与特殊气泡，并进行局部靶向 OCR
       val comicDetections = try {
-        ComicTextDetector.detect(targetBitmap, context = context, scoreThreshold = 0.28f, artScoreThreshold = 0.18f)
+        ComicTextDetector.detect(targetBitmap, context = context)
       } catch (e: Exception) {
         emptyList()
       }
@@ -596,7 +599,8 @@ object MangaOcrProcessor {
         preferredLang = filterLang
       )
 
-      val filtered = filterByTargetLanguage(fusedBubbles, filterLang)
+      val cleanedBubbles = filterFalsePositiveArtBoxes(fusedBubbles, targetBitmap)
+      val filtered = filterByTargetLanguage(cleanedBubbles, filterLang)
       // 气泡无重叠与碰撞解耦：彻底杜绝多个框在原图上相互重叠
       val decollided = resolveBubbleOverlaps(filtered)
 
@@ -744,10 +748,12 @@ object MangaOcrProcessor {
 
     // 9. 方法 2 核心：漫画专用端侧深度学习检测器融合 (ComicTextDetector - 分类别动态置信度)
     val comicDetections = try {
-      ComicTextDetector.detect(bitmap, context = context, scoreThreshold = 0.28f, artScoreThreshold = 0.18f)
+      ComicTextDetector.detect(bitmap, context = context)
     } catch (e: Exception) {
       emptyList()
     }
+
+    android.util.Log.i("BubbleOCR", "[DETECTED_REGIONS] rawLines=${allDetectedLines.size}, deduplicatedLines=${deduplicatedLines.size}, rawBubbles=${rawBubbles.size}, comicDetections=${comicDetections.size}")
 
     val fusedBubbles = fuseComicDetections(
       recognizer = recognizer,
@@ -757,8 +763,79 @@ object MangaOcrProcessor {
       preferredLang = filterLang
     )
 
-    val filtered = filterByTargetLanguage(fusedBubbles, filterLang)
-    return resolveBubbleOverlaps(filtered)
+    val cleanedBubbles = filterFalsePositiveArtBoxes(fusedBubbles, bitmap)
+    val filtered = filterByTargetLanguage(cleanedBubbles, filterLang)
+    val finalBubbles = resolveBubbleOverlaps(filtered)
+    android.util.Log.i("BubbleOCR", "[FINAL_RESULTS] resolveBubbleOverlaps returning ${finalBubbles.size} bubbles")
+    return finalBubbles
+  }
+
+
+  /**
+   * 误检过滤：漫画模型在 640 输入下会给出「极小碎片框」与「平坦色块框」。
+   * - 面板类气泡/对白不参与该过滤，避免误删正常文本
+   * - 仅作用于 detectorSource == comic_model 的艺术字/拟声词框
+   */
+  private fun filterFalsePositiveArtBoxes(
+    bubbles: List<Map<String, Any>>,
+    bitmap: Bitmap
+  ): List<Map<String, Any>> {
+    val pageArea = bitmap.width.toFloat() * bitmap.height
+    return bubbles.filter { b ->
+      if (b["detectorSource"] != "comic_model") return@filter true
+      val type = b["textType"] as? String ?: "bubble"
+      if (type == "bubble" || type == "free_text") return@filter true
+      val box = b["box"] as? Map<*, *> ?: return@filter true
+      val x = (box["x"] as? Number)?.toInt() ?: return@filter true
+      val y = (box["y"] as? Number)?.toInt() ?: return@filter true
+      val w = (box["width"] as? Number)?.toInt() ?: return@filter true
+      val h = (box["height"] as? Number)?.toInt() ?: return@filter true
+      if (w <= 0 || h <= 0) return@filter false
+      // 1) 极小碎片（如注音单字、瞳孔上的误检）
+      if (w.toFloat() * h / pageArea < 0.0012f) {
+        android.util.Log.i("BubbleOCR", "[FP_FILTER] drop tiny art box ${w}x$h at ($x,$y)")
+        return@filter false
+      }
+      // 2) 平坦无字区域（墙面、皮肤、纯色块）
+      val rect = Rect(x, y, min(bitmap.width, x + w), min(bitmap.height, y + h))
+      if (isFlatRegion(bitmap, rect)) {
+        android.util.Log.i("BubbleOCR", "[FP_FILTER] drop flat art box ${w}x$h at ($x,$y)")
+        return@filter false
+      }
+      true
+    }
+  }
+
+  /** 抽样统计灰度标准差，判断是否为无文字的平坦区域 */
+  private fun isFlatRegion(bitmap: Bitmap, rect: Rect): Boolean {
+    if (rect.width() < 4 || rect.height() < 4) return true
+    val stepX = max(1, rect.width() / 8)
+    val stepY = max(1, rect.height() / 8)
+    var n = 0
+    var sum = 0.0
+    var sumSq = 0.0
+    var dark = 0
+    var y = rect.top
+    while (y < rect.bottom) {
+      var x = rect.left
+      while (x < rect.right) {
+        val c = bitmap.getPixel(x, y)
+        val g = (0.299f * Color.red(c) + 0.587f * Color.green(c) + 0.114f * Color.blue(c))
+        if (g < 110f) dark++
+        sum += g
+        sumSq += (g * g).toDouble()
+        n++
+        x += stepX
+      }
+      y += stepY
+    }
+    if (n < 16) return true
+    val mean = sum / n
+    val variance = (sumSq / n) - (mean * mean)
+    val std = kotlin.math.sqrt(max(0.0, variance))
+    val darkRatio = dark.toFloat() / n
+    // 近乎单色的平坦区域（纯白/纯黑/单一底色）→ 视为无字
+    return std < 18.0 && (darkRatio < 0.12f || darkRatio > 0.88f)
   }
 
   /**
@@ -861,13 +938,28 @@ object MangaOcrProcessor {
     try {
       cropBmp = Bitmap.createBitmap(sourceBitmap, cropLeft, cropTop, cropW, cropH)
 
-      // 0. 优先调用漫画端侧专用模型 (Manga-OCR Mobile) 识别原始切片
+      val isWideHorizontal = regionRect.width() >= regionRect.height() * 1.8f ||
+          (regionRect.width() >= 160 && regionRect.width() > regionRect.height())
+
+      // 0. 优先调用漫画端侧专用 CharSpot 模型 (CharSpot-Small: 单次前向+原生阅读顺序+字符级坐标)
       if (MangaOcrModel.isModelReady) {
-        val mangaOcrText = MangaOcrModel.recognize(cropBmp)
-        if (mangaOcrText.isNotBlank() && !isJunkNoiseLine(mangaOcrText, regionRect)) {
+        val ocrRes = MangaOcrModel.recognizeDetail(cropBmp)
+        if (ocrRes.text.isNotBlank() && !isJunkNoiseLine(ocrRes.text, regionRect)) {
+          val disambiguated = disambiguateMangaCharacters(ocrRes.text)
           val isVertical = regionRect.height() > regionRect.width() * 1.15f
-          val disambiguated = disambiguateMangaCharacters(mangaOcrText)
           val langInfo = detectLanguage(disambiguated, preferredLang, screenHasJapanese)
+          val charsPayload = ocrRes.chars.map { c ->
+            mapOf(
+              "char" to c.char,
+              "score" to c.score,
+              "box" to listOf(
+                c.box.left + cropLeft,
+                c.box.top + cropTop,
+                c.box.right + cropLeft,
+                c.box.bottom + cropTop
+              )
+            )
+          }
           return mapOf(
             "sourceText" to disambiguated,
             "lines" to listOf(disambiguated),
@@ -875,7 +967,9 @@ object MangaOcrProcessor {
             "detectedLang" to langInfo.langCode,
             "langName" to langInfo.langName,
             "langColor" to langInfo.badgeColor,
-            "ocrEngine" to "manga_ocr"
+            "confidence" to max(0.92f, ocrRes.avgScore),
+            "ocrEngine" to "charspot",
+            "chars" to charsPayload
           )
         }
       }
@@ -1007,11 +1101,27 @@ object MangaOcrProcessor {
         deduplicated.sortedBy { it.rect.centerY() }
       }
 
-      val linesText = sortedLines.map { it.text.trim() }.filter { it.isNotEmpty() && !isJunkNoiseLine(it, regionRect) }
-      if (linesText.isEmpty()) return null
+      val consolidatedText = consolidateGroupCandidates(sortedLines, isVertical)
 
-      val disambiguatedLines = linesText.map { disambiguateMangaCharacters(it) }
-      val fullText = disambiguatedLines.joinToString(if (isVertical) "\n" else " ")
+      // 若有 Manga-OCR 候选，通过多通道共识裁决器综合仲裁，防止孤立幻觉覆盖有效基础文本
+      val finalText = if (mangaOcrTextCand != null && consolidatedText.isNotBlank()) {
+        val cands = listOf(
+          CandidateInfo(consolidatedText, source = "mlkit_multiscale", confidence = 0.88f),
+          CandidateInfo(mangaOcrTextCand, source = "manga_ocr", confidence = 0.92f)
+        )
+        arbitrateMultiChannelCandidates(consolidatedText, cands, isWideHorizontal)
+      } else if (consolidatedText.isNotBlank()) {
+        consolidatedText
+      } else if (mangaOcrTextCand != null) {
+        mangaOcrTextCand
+      } else {
+        return null
+      }
+
+      if (finalText.isBlank() || isJunkNoiseLine(finalText, regionRect)) return null
+      val disambiguatedText = disambiguateMangaCharacters(finalText)
+      val disambiguatedLines = disambiguatedText.split(if (isVertical) "\n" else " ").filter { it.isNotBlank() }
+      val fullText = disambiguatedText
 
       val langInfo = detectLanguage(fullText, preferredLang, screenHasJapanese)
       val avgRawConf = deduplicated.mapNotNull { it.rawConfidence }.takeIf { it.isNotEmpty() }?.average()?.toFloat()
@@ -1087,15 +1197,27 @@ object MangaOcrProcessor {
       if (matchedExistingIndex >= 0) {
         val existing = resultList[matchedExistingIndex].toMutableMap()
         existing["detectorSource"] = "comic_model"
+        if (det.category == 2) {
+          existing["box"] = mapOf(
+            "x" to dRect.left,
+            "y" to dRect.top,
+            "width" to dRect.width(),
+            "height" to dRect.height()
+          )
+        }
 
         val curLines = (existing["lines"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
         val curText = existing["sourceText"] as? String ?: ""
         val curConf = (existing["confidence"] as? Number)?.toFloat() ?: 0.85f
         val aspect = dRect.height().toFloat() / max(1, dRect.width())
-        // 关键判定：若全屏初筛只识别出了 1 列，但该气泡物理框具备多列特征，或置信度偏低 (< 0.70)，或疑似残破文本：
-        // 自动触发局部 2.0x 靶向切片精扫，在第一遍识别中就立刻拆分多列排版并提升文字精度！
+        val isWideHorizontal = dRect.width() >= dRect.height() * 1.8f ||
+            (dRect.width() >= 160 && dRect.width() > dRect.height())
+        val curScore = evaluateCandidateQuality(curText, rawConfidence = curConf)
+
+        val hasNoiseOrStutter = curText.any { it in '0'..'9' || it in setOf('|', 'l', '1', 'I', '/') } || curScore < 2.0f
         val isLikelyMultiCol = (curLines.size <= 1) && (dRect.width() >= 40 && dRect.height() >= 55 && aspect in 0.8f..3.8f)
-        if (isLikelyMultiCol || curConf < 0.70f || curText.length <= 4 || curText.contains("?") || curText.contains("！") || curText.contains("…")) {
+
+        if (isLikelyMultiCol || curConf < 0.78f || curText.length <= 4 || curText.contains("?") || curText.contains("！") || curText.contains("…") || hasNoiseOrStutter || !existing.containsKey("chars")) {
           val enhanced = enhanceCandidateRegion(
             recognizer = recognizer,
             sourceBitmap = sourceBitmap,
@@ -1103,39 +1225,17 @@ object MangaOcrProcessor {
             preferredLang = preferredLang,
             screenHasJapanese = true
           )
-          val enhancedLines = (enhanced?.get("lines") as? List<*>)?.mapNotNull { it as? String }
-          if (enhancedLines != null && enhancedLines.isNotEmpty()) {
+          if (enhanced != null) {
             val enhancedText = enhanced["sourceText"] as? String ?: ""
-            if (enhancedLines.size > curLines.size || (enhancedLines.size >= curLines.size && enhancedText.length >= curText.length)) {
+            if (enhancedText.isNotBlank()) {
               existing["sourceText"] = enhancedText
-              existing["lines"] = enhancedLines
-              existing["columnCount"] = enhancedLines.size
-              existing["direction"] = enhanced["direction"] as? String ?: existing["direction"] ?: "vertical"
-              existing["confidence"] = enhanced["confidence"] as? Float ?: 0.94f
+              existing["lines"] = enhanced["lines"] as? List<*> ?: listOf(enhancedText)
+              existing["direction"] = enhanced["direction"] as? String ?: (if (aspect > 1.15f) "vertical" else "horizontal")
+              existing["confidence"] = (enhanced["confidence"] as? Number)?.toFloat() ?: 0.94f
+              existing["ocrEngine"] = enhanced["ocrEngine"] as? String ?: "charspot"
             }
-          } else if (MangaOcrModel.isModelReady && (curText.length <= 4 || curText.contains("?") || curText.contains("！"))) {
-            // 端侧 Manga-OCR 模型兜底增强
-            val pad = 8
-            val cl = max(0, dRect.left - pad)
-            val ct = max(0, dRect.top - pad)
-            val cr = min(sourceBitmap.width, dRect.right + pad)
-            val cb = min(sourceBitmap.height, dRect.bottom + pad)
-            if (cr - cl >= 14 && cb - ct >= 14) {
-              var cropBmp: Bitmap? = null
-              try {
-                cropBmp = Bitmap.createBitmap(sourceBitmap, cl, ct, cr - cl, cb - ct)
-                val mangaText = MangaOcrModel.recognize(cropBmp)
-                if (mangaText.isNotBlank() && mangaText.length >= curText.length && !isJunkNoiseLine(mangaText, dRect)) {
-                  val disambiguated = disambiguateMangaCharacters(mangaText)
-                  existing["sourceText"] = disambiguated
-                  existing["lines"] = listOf(disambiguated)
-                  existing["ocrEngine"] = "manga_ocr"
-                  existing["confidence"] = 0.92f
-                }
-              } catch (e: Exception) {
-              } finally {
-                cropBmp?.recycle()
-              }
+            if (enhanced.containsKey("chars")) {
+              existing["chars"] = enhanced["chars"] as Any
             }
           }
         }
@@ -1222,6 +1322,9 @@ object MangaOcrProcessor {
           "detectorSource" to "comic_model",
           "confidence" to finalConf
         )
+        if (targetEnhancement != null && targetEnhancement.containsKey("chars")) {
+          newBubble["chars"] = targetEnhancement["chars"] as Any
+        }
 
         resultList.add(newBubble)
       }
@@ -1694,6 +1797,413 @@ object MangaOcrProcessor {
   }
 
   /**
+   * 顺序敏感的归一化编辑距离相似度 (0.0 ~ 1.0)
+   * 基于去除空白与标点后的有效字符计算 Levenshtein 距离，严格保留字符先后顺序与重复结构
+   */
+  fun computeNormalizedSequenceSimilarity(s1: String, s2: String): Float {
+    val c1 = s1.replace(Regex("[\\s\\p{P}\\d]+"), "")
+    val c2 = s2.replace(Regex("[\\s\\p{P}\\d]+"), "")
+    if (c1.isEmpty() && c2.isEmpty()) return if (s1 == s2) 1.0f else 0.0f
+    if (c1.isEmpty() || c2.isEmpty()) return 0.0f
+    if (c1 == c2) return 1.0f
+
+    // 子串包含且长度比充分接近（如「迷えるアナタに」与「迷えるアナタ」比值>=0.70）
+    if (c1.contains(c2) || c2.contains(c1)) {
+      val ratio = min(c1.length, c2.length).toFloat() / max(c1.length, c2.length)
+      if (ratio >= 0.70f) return ratio
+    }
+
+    val len1 = c1.length
+    val len2 = c2.length
+    val maxLen = max(len1, len2)
+    if (maxLen == 0) return 1.0f
+
+    val dp = IntArray(len2 + 1) { it }
+    for (i in 1..len1) {
+      var prev = dp[0]
+      dp[0] = i
+      for (j in 1..len2) {
+        val temp = dp[j]
+        val cost = if (c1[i - 1] == c2[j - 1]) 0 else 1
+        dp[j] = min(min(dp[j] + 1, dp[j - 1] + 1), prev + cost)
+        prev = temp
+      }
+    }
+    val dist = dp[len2]
+    return max(0.0f, 1.0f - dist.toFloat() / maxLen)
+  }
+
+  data class CandidateInfo(
+    val text: String,
+    val source: String, // "base", "pass2", "manga_ocr", "enhanced", etc.
+    val confidence: Float = 0.85f,
+    val weight: Float = 1.0f
+  )
+
+  /**
+   * 多通道候选共识裁决器 (Multi-Channel Candidate Consensus Arbiter)
+   * 优先保留多通道一致、覆盖合理、与基础 Pass 序列有共识的候选；
+   * 严厉拦截在横排大标题/宽区域中因模型感受野退化而产生的孤立无共识 Manga-OCR 幻觉！
+   */
+  fun arbitrateMultiChannelCandidates(
+    baseText: String,
+    candidates: List<CandidateInfo>,
+    isWideHorizontal: Boolean
+  ): String {
+    if (candidates.isEmpty()) return baseText
+    if (candidates.size == 1) return candidates[0].text.trim()
+
+    val baseScores = candidates.map { c ->
+      evaluateCandidateQuality(c.text, c.weight, c.confidence)
+    }
+
+    val compositeScores = candidates.mapIndexed { i, cand ->
+      var score = baseScores[i]
+      var maxConsensus = 0f
+      var consensusPartnerIdx = -1
+
+      for (j in candidates.indices) {
+        if (i == j) continue
+        val sim = computeNormalizedSequenceSimilarity(cand.text, candidates[j].text)
+        if (sim > maxConsensus) {
+          maxConsensus = sim
+          consensusPartnerIdx = j
+        }
+      }
+
+      val hasConsensus = maxConsensus >= 0.45f
+
+      if (hasConsensus) {
+        // 共识加成：多通道互相印证
+        score *= (1.0f + 0.35f * maxConsensus)
+
+        // 覆盖度合理性加成：若当前候选包含并完整覆盖其共识搭档，予以完整度奖励
+        if (consensusPartnerIdx >= 0) {
+          val partner = candidates[consensusPartnerIdx]
+          val cleanThis = cand.text.replace(Regex("[\\s\\p{P}\\d]+"), "")
+          val cleanPartner = partner.text.replace(Regex("[\\s\\p{P}\\d]+"), "")
+          val prefixLen = min(8, cleanPartner.length)
+          if (cleanThis.length > cleanPartner.length && prefixLen > 0 && cleanThis.startsWith(cleanPartner.substring(0, prefixLen))) {
+            score *= 1.25f
+          }
+        }
+      } else {
+        // 在横排大标题/宽区域中，孤立无任何共识的 Manga-OCR 候选极可能是因为正方形 padding 感受野退化导致的严重幻觉，
+        // 当存在已有文本 (长度 >= 6) 时，对孤立幻觉予以严厉惩罚 (0.30x)！
+        if (isWideHorizontal && cand.source == "manga_ocr") {
+          val hasViableBase = candidates.any { it.source != "manga_ocr" && it.text.replace(Regex("\\s+"), "").length >= 6 }
+          if (hasViableBase) {
+            score *= 0.30f
+          }
+        }
+      }
+
+      score
+    }
+
+    var bestIdx = 0
+    for (i in 1 until candidates.size) {
+      if (compositeScores[i] > compositeScores[bestIdx]) {
+        bestIdx = i
+      }
+    }
+
+    candidates.forEachIndexed { idx, cand ->
+      android.util.Log.i("BubbleOCR", "[OCR_CANDIDATE] source=${cand.source}, text='${cand.text}', rawScore=${baseScores[idx]}, compositeScore=${compositeScores[idx]}")
+    }
+    android.util.Log.i("BubbleOCR", "[OCR_WINNER] selected='${candidates[bestIdx].text.trim()}', isWideHorizontal=$isWideHorizontal")
+
+    return candidates[bestIdx].text.trim()
+  }
+
+  /**
+   * 日文脚本完整性、清洁度与置信度质量评分函数
+   * 惩罚数字/线条噪点、惩罚口吃冗余重复，奖励高纯度平片假名与完整语句
+   * 对 cjkCount <= 1 的孤立单字实施 50% 碎片降权，确保完整多字对白决定性胜出
+   */
+  fun evaluateCandidateQuality(
+    text: String,
+    confidenceWeight: Float = 1.0f,
+    rawConfidence: Float? = null
+  ): Float {
+    val clean = text.replace(Regex("\\s+"), "")
+    if (clean.isEmpty()) return 0f
+
+    var kanaCount = 0
+    var kanjiCount = 0
+    var noiseCount = 0
+    var punctCount = 0
+
+    for (ch in clean) {
+      when {
+        (ch in '\u3040'..'\u309F') || (ch in '\u30A0'..'\u30FA' && ch != 'ー') -> kanaCount++
+        ch in '\u4E00'..'\u9FFF' -> kanjiCount++
+        ch in '0'..'9' || ch in setOf('|', 'l', '1', 'I', '/', '\\', '^', '`', ';') -> noiseCount++
+        ch in setOf('ー', '―', '—', '…', '・', '！', '!', '？', '?', '。', '、', '〜', '~', '♡', '♥', '.', '．') -> punctCount++
+      }
+    }
+
+    val totalLen = clean.length.toFloat()
+    val cjkCount = kanaCount + kanjiCount
+    if (cjkCount == 0 && noiseCount > 0) return 0f
+
+    // 1. 脚本纯度：奖励有效字符，严厉扣减数字/ASCII噪点（如 OCR 把「ー」误读为「1」）
+    val scriptPurity = (cjkCount * 1.5f + punctCount * 0.8f - noiseCount * 3.0f) / totalLen
+
+    // 2. 完整性加成：长度适中的完整语句显著优于碎断孤立单字
+    val completenessBonus = min(4.0f, cjkCount * 0.8f)
+
+    // 3. 冗余词语/口吃重复惩罚（如 "は1い今ははーい" 中的重叠词）
+    var redundancyPenalty = 0f
+    if (clean.length >= 6) {
+      for (subLen in 2..min(5, clean.length / 2)) {
+        for (i in 0..clean.length - subLen * 2) {
+          val sub = clean.substring(i, i + subLen)
+          if (clean.indexOf(sub, i + subLen) != -1) {
+            redundancyPenalty += 0.8f
+            break
+          }
+        }
+      }
+    }
+
+    // 4. 单字符碎片惩罚：单字缺乏语义互信息，绝不能压制完整句子
+    var rawScore = scriptPurity * 2.0f + completenessBonus - redundancyPenalty
+    if (cjkCount <= 1) {
+      rawScore *= 0.5f
+    }
+
+    // 5. 置信度综合权重
+    val baseConf = rawConfidence ?: (0.65f + min(0.30f, confidenceWeight / 8.0f))
+
+    return max(0.01f, rawScore) * baseConf
+  }
+
+  /**
+   * 判定两个候选是否为冲突候选（竞争同一物理空间，或存在碎片包含关系）
+   * 冲突候选绝不能简单拼接，必须择优保留最佳完整候选！
+   */
+  fun areCandidatesConflicting(
+    a: TextLineItem,
+    b: TextLineItem,
+    isVertical: Boolean
+  ): Boolean {
+    val cleanA = a.text.replace(Regex("[\\s\\p{P}\\d]+"), "")
+    val cleanB = b.text.replace(Regex("[\\s\\p{P}\\d]+"), "")
+
+    val iou = computeIoU(a.rect, b.rect)
+    val inter = computeIntersection(a.rect, b.rect)
+    val minArea = min(a.rect.width() * a.rect.height(), b.rect.width() * b.rect.height()).toFloat()
+    val overlapRatio = if (minArea > 0f) inter / minArea else 0f
+
+    // 1. 碎片包含关系：若一个是另一个的子串/后缀/前缀（如 "れ" 属于 "あれ", "今" 属于 "今幸せですか"）
+    if (cleanA.isNotEmpty() && cleanB.isNotEmpty()) {
+      if (cleanA.contains(cleanB) || cleanB.contains(cleanA)) {
+        if (iou > 0.05f || overlapRatio > 0.15f) return true
+
+        if (isVertical) {
+          val xDist = abs(a.rect.centerX() - b.rect.centerX())
+          val maxW = max(a.rect.width(), b.rect.width())
+          if (xDist <= maxW * 0.65f) return true
+        } else {
+          val yDist = abs(a.rect.centerY() - b.rect.centerY())
+          val maxH = max(a.rect.height(), b.rect.height())
+          if (yDist <= maxH * 0.65f) return true
+        }
+      }
+
+      // 序列相似度高（>= 0.60）：同一文本在不同尺度的竞争性候选
+      val seqSim = computeNormalizedSequenceSimilarity(a.text, b.text)
+      if (seqSim >= 0.60f) return true
+    }
+
+    // 2. 空间与文本双重冲突判定
+    // 注意：文字不同的真实相邻行在艺术字/密集排版中常有 20~35% 的框体交叠，
+    // 只有文本相似 (sim >= 0.50) 或包含时才依据微弱交叠冲突；
+    // 文字完全不同时，只有当物理重叠极端高度一致 (IoU >= 0.55 或包含比 >= 0.75) 才判定冲突！
+    val hasTextMatch = cleanA.isNotEmpty() && cleanB.isNotEmpty() &&
+        (cleanA.contains(cleanB) || cleanB.contains(cleanA) || computeNormalizedSequenceSimilarity(a.text, b.text) >= 0.50f)
+
+    if (hasTextMatch) {
+      if (iou >= 0.15f || overlapRatio >= 0.30f) return true
+      if (isVertical) {
+        val xDist = abs(a.rect.centerX() - b.rect.centerX())
+        val maxW = max(a.rect.width(), b.rect.width())
+        if (xDist <= maxW * 0.45f) {
+          val yOverlap = max(0, min(a.rect.bottom, b.rect.bottom) - max(a.rect.top, b.rect.top))
+          val minH = min(a.rect.height(), b.rect.height())
+          if (minH > 0 && (yOverlap.toFloat() / minH) >= 0.20f) return true
+        }
+      } else {
+        val yDist = abs(a.rect.centerY() - b.rect.centerY())
+        val maxH = max(a.rect.height(), b.rect.height())
+        if (yDist <= maxH * 0.45f) {
+          val xOverlap = max(0, min(a.rect.right, b.rect.right) - max(a.rect.left, b.rect.left))
+          val minW = min(a.rect.width(), b.rect.width())
+          if (minW > 0 && (xOverlap.toFloat() / minW) >= 0.20f) return true
+        }
+      }
+    } else {
+      if (iou >= 0.55f || overlapRatio >= 0.75f) return true
+    }
+
+    return false
+  }
+
+  /**
+   * 判定两个候选行是否严格证明互补（必须按几何顺序上下或左右衔接，非重叠，非冲突）
+   */
+  fun areStrictlyComplementary(
+    first: TextLineItem,
+    second: TextLineItem,
+    isVertical: Boolean
+  ): Boolean {
+    // 任何冲突/包含/交叠直接否决互补
+    if (areCandidatesConflicting(first, second, isVertical)) return false
+
+    val clean1 = first.text.replace(Regex("[\\s\\p{P}]+"), "")
+    val clean2 = second.text.replace(Regex("[\\s\\p{P}]+"), "")
+    if (clean1.isEmpty() || clean2.isEmpty()) return false
+
+    // 文本相似度过高不能互补
+    if (computeNormalizedSequenceSimilarity(first.text, second.text) >= 0.30f) return false
+
+    if (isVertical) {
+      val topItem = if (first.rect.top <= second.rect.top) first else second
+      val bottomItem = if (first.rect.top <= second.rect.top) second else first
+
+      // 水平对齐
+      val xDist = abs(topItem.rect.centerX() - bottomItem.rect.centerX())
+      val maxW = max(topItem.rect.width(), bottomItem.rect.width())
+      if (xDist > maxW * 0.40f) return false
+
+      // 垂直非重叠且在自然字距范围内
+      val gap = bottomItem.rect.top - topItem.rect.bottom
+      val avgCharSize = (topItem.charSize + bottomItem.charSize) / 2.0f
+      return gap in (-avgCharSize * 0.20f).toInt()..(avgCharSize * 2.5f).toInt()
+    } else {
+      val leftItem = if (first.rect.left <= second.rect.left) first else second
+      val rightItem = if (first.rect.left <= second.rect.left) second else first
+
+      // 垂直对齐
+      val yDist = abs(leftItem.rect.centerY() - rightItem.rect.centerY())
+      val maxH = max(leftItem.rect.height(), rightItem.rect.height())
+      if (yDist > maxH * 0.40f) return false
+
+      // 水平非重叠且在自然字距范围内
+      val gap = rightItem.rect.left - leftItem.rect.right
+      val avgCharSize = (leftItem.charSize + rightItem.charSize) / 2.0f
+      return gap in (-avgCharSize * 0.20f).toInt()..(avgCharSize * 2.5f).toInt()
+    }
+  }
+
+  /**
+   * 对同一行或同一列内的候选执行消歧裁决与互补合并，禁止无条件拼接
+   */
+  fun consolidateGroupCandidates(
+    items: List<TextLineItem>,
+    isVertical: Boolean
+  ): String {
+    if (items.isEmpty()) return ""
+    if (items.size == 1) return items[0].text.trim()
+
+    val sorted = if (isVertical) {
+      items.sortedBy { it.rect.top }
+    } else {
+      items.sortedWith { a, b ->
+        val yDiff = a.rect.centerY() - b.rect.centerY()
+        val minH = min(a.rect.height(), b.rect.height())
+        if (abs(yDiff) > minH * 0.40f) {
+          a.rect.top - b.rect.top
+        } else {
+          a.rect.left - b.rect.left
+        }
+      }
+    }
+
+    // 1. 将冲突候选聚集到段落分段中
+    val segments = mutableListOf<MutableList<TextLineItem>>()
+    for (item in sorted) {
+      var matchedSeg: MutableList<TextLineItem>? = null
+      for (seg in segments) {
+        if (seg.any { areCandidatesConflicting(it, item, isVertical) }) {
+          matchedSeg = seg
+          break
+        }
+      }
+      if (matchedSeg != null) {
+        matchedSeg.add(item)
+      } else {
+        segments.add(mutableListOf(item))
+      }
+    }
+
+    // 2. 对每个冲突段落：按质量打分与子片段吸收规则选择唯一最佳完整候选，绝不简单拼接
+    val resolvedSegments = segments.map { seg ->
+      if (seg.size == 1) {
+        seg[0]
+      } else {
+        seg.reduce { best, cur ->
+          val cleanBest = best.text.replace(Regex("[\\s\\p{P}\\d]+"), "")
+          val cleanCur = cur.text.replace(Regex("[\\s\\p{P}\\d]+"), "")
+          val bestScore = evaluateCandidateQuality(best.text, best.confidenceWeight, best.rawConfidence)
+          val curScore = evaluateCandidateQuality(cur.text, cur.confidenceWeight, cur.rawConfidence)
+
+          // 子片段吸收规则：母串包含子串且质量达标时，母串吞并子片段
+          if (cleanBest.contains(cleanCur) && cleanCur.length < cleanBest.length && bestScore >= curScore * 0.7f) {
+            best
+          } else if (cleanCur.contains(cleanBest) && cleanBest.length < cleanCur.length && curScore >= bestScore * 0.7f) {
+            cur
+          } else if (curScore > bestScore) {
+            cur
+          } else {
+            best
+          }
+        }
+      }
+    }
+
+    val sortedSegments = if (isVertical) {
+      resolvedSegments.sortedBy { it.rect.top }
+    } else {
+      resolvedSegments.sortedWith { a, b ->
+        val yDiff = a.rect.centerY() - b.rect.centerY()
+        val minH = min(a.rect.height(), b.rect.height())
+        if (abs(yDiff) > minH * 0.40f) {
+          a.rect.top - b.rect.top
+        } else {
+          a.rect.left - b.rect.left
+        }
+      }
+    }
+
+    // 3. 严格证明互补才顺序合并
+    val finalParts = mutableListOf<String>()
+    for (i in sortedSegments.indices) {
+      val cur = sortedSegments[i]
+      if (finalParts.isEmpty()) {
+        finalParts.add(cur.text.trim())
+      } else {
+        val prevItem = sortedSegments[i - 1]
+        if (areStrictlyComplementary(prevItem, cur, isVertical)) {
+          finalParts.add(cur.text.trim())
+        } else {
+          val cleanCur = cur.text.replace(Regex("[\\s\\p{P}]+"), "")
+          val alreadyCovered = finalParts.any { p ->
+            val cleanP = p.replace(Regex("[\\s\\p{P}]+"), "")
+            cleanP.contains(cleanCur) || computeNormalizedSequenceSimilarity(p, cur.text) >= 0.60f
+          }
+          if (!alreadyCovered) {
+            finalParts.add(cur.text.trim())
+          }
+        }
+      }
+    }
+
+    return if (isVertical) finalParts.joinToString("") else finalParts.joinToString(" ")
+  }
+
+  /**
    * 跨尺度去重与融合：保留更精准或包含更多字符的检测结果，绝不误吞并同气泡内不同行/列文字
    */
   private fun deduplicateLines(lines: List<TextLineItem>): List<TextLineItem> {
@@ -1706,28 +2216,47 @@ object MangaOcrProcessor {
         val inter = computeIntersection(line.rect, existing.rect)
         val minArea = min(line.rect.width() * line.rect.height(), existing.rect.width() * existing.rect.height()).toFloat()
         val overlapRatio = if (minArea > 0f) inter / minArea else 0f
+        val dx = abs(line.rect.centerX() - existing.rect.centerX())
+        val dy = abs(line.rect.centerY() - existing.rect.centerY())
+        val maxW = max(line.rect.width(), existing.rect.width())
+        val maxH = max(line.rect.height(), existing.rect.height())
+        val centerAligned = (dx <= maxW * 0.45f) && (dy <= maxH * 0.45f)
 
-        val isSameOrContained = line.text.contains(existing.text) || existing.text.contains(line.text)
+        val cleanLine = line.text.replace(Regex("[\\s\\p{P}\\d]+"), "")
+        val cleanExist = existing.text.replace(Regex("[\\s\\p{P}\\d]+"), "")
 
-        // 仅在确认属于同一个文字实例在不同尺度/通道下的重复检出时才融合：
-        // 1) 文本相互包含 (如「あれ？鮮血…？」包含「鮮血…？」)，且物理区域有明显交叠 (iou > 0.30 或 overlapRatio > 0.45)
-        // 2) 物理边界极其重叠 (iou > 0.60)，说明是同一坐标下的不同通道识别结果
-        if ((isSameOrContained && (iou > 0.30f || overlapRatio > 0.45f)) || iou > 0.60f) {
+        // 1. 包含与碎片判定：若一个候选是另一个候选的子串/后缀/前缀，且空间属于同一物理区域
+        val isFragmentOrContained = (cleanLine.isNotEmpty() && cleanExist.isNotEmpty()) &&
+            (cleanLine.contains(cleanExist) || cleanExist.contains(cleanLine)) &&
+            (iou > 0.15f || overlapRatio > 0.40f)
+
+        // 2. 空间高度重合（IoU > 0.35 或包含比 > 0.55 且中心对齐）
+        val isSpatialMatch = (iou > 0.35f || overlapRatio > 0.55f) && centerAligned
+        val seqSim = computeNormalizedSequenceSimilarity(line.text, existing.text)
+
+        // 3. 强空间冲突判定：两行物理框重合度极高 (IoU > 0.50 或包含比 > 0.75 且中心对齐)
+        val isHeavyConflict = (iou > 0.50f || overlapRatio > 0.75f) && centerAligned
+
+        if (isFragmentOrContained || (isSpatialMatch && seqSim >= 0.65f) || isHeavyConflict) {
           val unionRect = Rect(
             min(line.rect.left, existing.rect.left),
             min(line.rect.top, existing.rect.top),
             max(line.rect.right, existing.rect.right),
             max(line.rect.bottom, existing.rect.bottom)
           )
+
+          val lineScore = evaluateCandidateQuality(line.text, line.confidenceWeight, line.rawConfidence)
+          val existScore = evaluateCandidateQuality(existing.text, existing.confidenceWeight, existing.rawConfidence)
+
           val preferredLine = when {
-            line.text.contains(existing.text) -> line
-            existing.text.contains(line.text) -> existing
-            line.text.length > existing.text.length -> line
-            existing.text.length > line.text.length -> existing
-            // 核心修复：相同长度候选词时，优先采纳高分辨率锐化通道 (Pass 2, Weight=3.2f) 的高保真识别结果！
+            cleanExist.contains(cleanLine) && existScore >= lineScore * 0.7f -> existing
+            cleanLine.contains(cleanExist) && lineScore >= existScore * 0.7f -> line
+            lineScore > existScore -> line
+            existScore > lineScore -> existing
             line.confidenceWeight > existing.confidenceWeight -> line
             else -> existing
           }
+
           val accumulatedWeight = existing.confidenceWeight + line.confidenceWeight
           val maxRawConf = listOfNotNull(existing.rawConfidence, line.rawConfidence).maxOrNull()
           result[i] = preferredLine.copy(rect = unionRect, confidenceWeight = accumulatedWeight, rawConfidence = maxRawConf)
@@ -1846,9 +2375,56 @@ object MangaOcrProcessor {
             colGroups.add(mutableListOf(item))
           }
         }
-        colGroups.map { group ->
-          group.sortedBy { it.rect.top }.joinToString("") { it.text.trim() }
-        }.filter { it.isNotBlank() }
+        // 1. 每列内部：执行冲突消解与严格互补判定，绝不简单拼接
+        val colCandidates = colGroups.mapNotNull { group ->
+          val consolidated = consolidateGroupCandidates(group, isVertical = true)
+          if (consolidated.isNotBlank()) {
+            val cLeft = group.minOf { it.rect.left }
+            val cRight = group.maxOf { it.rect.right }
+            val cScore = group.map { evaluateCandidateQuality(it.text, it.confidenceWeight, it.rawConfidence) }.maxOrNull() ?: 0.5f
+            Triple(consolidated, cLeft to cRight, cScore)
+          } else null
+        }
+
+        // 2. 跨列冲突消解：若两列在 X 轴上重叠超过 40%，且存在包含或高相似度，说明是同一列的多尺度重叠竞争候选，绝不能拼成两列！
+        val resolvedCols = mutableListOf<Triple<String, Pair<Int, Int>, Float>>()
+        for (cand in colCandidates) {
+          var conflictIdx = -1
+          for (i in resolvedCols.indices) {
+            val existing = resolvedCols[i]
+            val (c1L, c1R) = cand.second
+            val (c2L, c2R) = existing.second
+            val hOverlap = max(0, min(c1R, c2R) - max(c1L, c2L))
+            val minW = max(1, min(c1R - c1L, c2R - c2L))
+            val overlapRatio = hOverlap.toFloat() / minW
+
+            val clean1 = cand.first.replace(Regex("[\\s\\p{P}]+"), "")
+            val clean2 = existing.first.replace(Regex("[\\s\\p{P}]+"), "")
+            val hasContainment = clean1.isNotEmpty() && clean2.isNotEmpty() && (clean1.contains(clean2) || clean2.contains(clean1))
+            val sim = computeNormalizedSequenceSimilarity(cand.first, existing.first)
+
+            // 跨列冲突判定：只有文本包含、序列高相似 (sim >= 0.50)、或物理高度重合 (overlapRatio >= 0.75 且 sim >= 0.35) 时才判定冲突
+            val isColConflict = (hasContainment && overlapRatio >= 0.20f) ||
+                (sim >= 0.50f && overlapRatio >= 0.20f) ||
+                (overlapRatio >= 0.75f && sim >= 0.35f)
+
+            if (isColConflict) {
+              conflictIdx = i
+              break
+            }
+          }
+
+          if (conflictIdx >= 0) {
+            val existing = resolvedCols[conflictIdx]
+            if (cand.third > existing.third) {
+              resolvedCols[conflictIdx] = cand
+            }
+          } else {
+            resolvedCols.add(cand)
+          }
+        }
+
+        resolvedCols.map { it.first }
       } else {
         val rowGroups = mutableListOf<MutableList<TextLineItem>>()
         val sortedByY = cluster.sortedBy { it.rect.centerY() }
@@ -1856,7 +2432,7 @@ object MangaOcrProcessor {
           var matchedGroup: MutableList<TextLineItem>? = null
           for (group in rowGroups) {
             val representative = group[0]
-            val threshold = max(12f, min(item.rect.height(), representative.rect.height()) * 0.75f)
+            val threshold = max(8f, min(item.rect.height(), representative.rect.height()) * 0.40f)
             if (abs(item.rect.centerY() - representative.rect.centerY()) < threshold) {
               matchedGroup = group
               break
@@ -1868,9 +2444,57 @@ object MangaOcrProcessor {
             rowGroups.add(mutableListOf(item))
           }
         }
-        rowGroups.map { group ->
-          group.sortedBy { it.rect.left }.joinToString(" ") { it.text.trim() }
-        }.filter { it.isNotBlank() }
+
+        // 1. 每行内部：执行冲突消解与严格互补判定
+        val rowCandidates = rowGroups.mapNotNull { group ->
+          val consolidated = consolidateGroupCandidates(group, isVertical = false)
+          if (consolidated.isNotBlank()) {
+            val rTop = group.minOf { it.rect.top }
+            val rBottom = group.maxOf { it.rect.bottom }
+            val rScore = group.map { evaluateCandidateQuality(it.text, it.confidenceWeight, it.rawConfidence) }.maxOrNull() ?: 0.5f
+            Triple(consolidated, rTop to rBottom, rScore)
+          } else null
+        }
+
+        // 2. 跨行冲突消解：只有当存在文本包含、序列高相似 (sim >= 0.50)、或物理高度重合 (overlapRatio >= 0.75 且 sim >= 0.35) 时才判定冲突！
+        // 绝不能仅凭微弱的上下边界交叠就误删文字完全不同的两行标题！
+        val resolvedRows = mutableListOf<Triple<String, Pair<Int, Int>, Float>>()
+        for (cand in rowCandidates) {
+          var conflictIdx = -1
+          for (i in resolvedRows.indices) {
+            val existing = resolvedRows[i]
+            val (r1T, r1B) = cand.second
+            val (r2T, r2B) = existing.second
+            val vOverlap = max(0, min(r1B, r2B) - max(r1T, r2T))
+            val minH = max(1, min(r1B - r1T, r2B - r2T))
+            val overlapRatio = vOverlap.toFloat() / minH
+
+            val clean1 = cand.first.replace(Regex("[\\s\\p{P}]+"), "")
+            val clean2 = existing.first.replace(Regex("[\\s\\p{P}]+"), "")
+            val hasContainment = clean1.isNotEmpty() && clean2.isNotEmpty() && (clean1.contains(clean2) || clean2.contains(clean1))
+            val sim = computeNormalizedSequenceSimilarity(cand.first, existing.first)
+
+            val isRowConflict = (hasContainment && overlapRatio >= 0.20f) ||
+                (sim >= 0.50f && overlapRatio >= 0.20f) ||
+                (overlapRatio >= 0.75f && sim >= 0.35f)
+
+            if (isRowConflict) {
+              conflictIdx = i
+              break
+            }
+          }
+
+          if (conflictIdx >= 0) {
+            val existing = resolvedRows[conflictIdx]
+            if (cand.third > existing.third) {
+              resolvedRows[conflictIdx] = cand
+            }
+          } else {
+            resolvedRows.add(cand)
+          }
+        }
+
+        resolvedRows.map { it.first }
       }
 
       // 1. 日漫多笔画形近字消歧与高频人名/词汇纠错 (如 漂子/慄子/廪子/稟子/癛子/澟子 -> 凛子)
@@ -2486,14 +3110,26 @@ object MangaOcrProcessor {
     try {
       croppedBitmap = Bitmap.createBitmap(bitmap, cropLeft, cropTop, cropW, cropH)
 
-      // 1. 若端侧漫画专用 Manga-OCR 模型就绪，直接对切片进行日漫模型识别
+      // 1. 若端侧漫画专用 CharSpot 模型就绪，直接对切片进行日漫模型识别
       if (MangaOcrModel.isModelReady) {
-        val ocrText = MangaOcrModel.recognize(croppedBitmap)
-        if (ocrText.isNotBlank()) {
+        val ocrRes = MangaOcrModel.recognizeDetail(croppedBitmap)
+        if (ocrRes.text.isNotBlank()) {
           val isVertical = cropH > cropW * 1.15f
-          val disambiguated = disambiguateMangaCharacters(ocrText)
+          val disambiguated = disambiguateMangaCharacters(ocrRes.text)
           val langInfo = detectLanguage(disambiguated, lang, true)
           val isSfx = disambiguated.length <= 5 && (disambiguated.contains("ッ") || disambiguated.contains("ガ") || disambiguated.contains("ポ"))
+          val charsPayload = ocrRes.chars.map { c ->
+            mapOf(
+              "char" to c.char,
+              "score" to c.score,
+              "box" to listOf(
+                c.box.left + cropLeft,
+                c.box.top + cropTop,
+                c.box.right + cropLeft,
+                c.box.bottom + cropTop
+              )
+            )
+          }
           return mapOf(
             "id" to "manga_crop_${System.currentTimeMillis()}",
             "box" to mapOf(
@@ -2512,7 +3148,9 @@ object MangaOcrProcessor {
             "langColor" to langInfo.badgeColor,
             "detectedBgColor" to "#FFFFFF",
             "detectedTextColor" to "#18181B",
-            "ocrEngine" to "manga_ocr"
+            "confidence" to max(0.92f, ocrRes.avgScore),
+            "ocrEngine" to "charspot",
+            "chars" to charsPayload
           )
         }
       }
@@ -2593,28 +3231,69 @@ object MangaOcrProcessor {
     // 3. 规范化压缩连续过长的横线、破折号、长音符、波浪号，避免拉得过长
     result = compressExcessiveRepeatedCharacters(result)
 
+    // 4. 清理标点后粘连的尾部重复碎片单字 (如 "あれ...れ" -> "あれ...", "今 幸せですか?.今" -> "今 幸せですか?.")
+    result = cleanTrailingDuplicateFragments(result)
+
     return result
   }
 
+  fun cleanTrailingDuplicateFragments(text: String): String {
+    if (text.length <= 3) return text
+    var res = text
+    val match = Regex("([\\s\\p{P}]+)([^\\s\\p{P}\\d])$").find(res)
+    if (match != null) {
+      val trailingChar = match.groupValues[2]
+      val prefix = res.substring(0, match.range.first)
+      if (prefix.contains(trailingChar)) {
+        res = prefix + match.groupValues[1].trimEnd()
+      }
+    }
+    return res
+  }
+
   /**
-   * 规范化并压缩冗长重复字符 (如将过长的 "--------" 或 "――――――" 或 "~~~~~~" 压缩为最多 2 个)
+   * 规范化并压缩冗长重复字符 (如将模型自回归退化产生的极长 "--------" 或 "――――――" 压缩为 2 个，同时保护合法拟声词)
    */
   fun compressExcessiveRepeatedCharacters(text: String): String {
     if (text.isBlank()) return text
     var result = text
-    // 压缩连续 3 个及以上的横线破折号（半角减号、全角破折号、日文全角横线、长音符）为 2 个破折号 "――"
-    result = result.replace(Regex("[-—―─━ー]{3,}"), "――")
-    // 压缩连续 3 个及以上的波浪号为 "~~"
-    result = result.replace(Regex("[~〜]{3,}"), "~~")
+    // 压缩连续 4 个及以上的横线破折号为 2 个 "――"
+    result = result.replace(Regex("[-—―─━ー]{4,}"), "――")
+    // 压缩连续 4 个及以上的波浪号为 "~~"
+    result = result.replace(Regex("[~〜]{4,}"), "~~")
     // 压缩连续等号与下划线
-    result = result.replace(Regex("={3,}"), "==")
-    result = result.replace(Regex("_{3,}"), "__")
+    result = result.replace(Regex("={4,}"), "==")
+    result = result.replace(Regex("_{4,}"), "__")
     // 压缩连续感叹号与问号
-    result = result.replace(Regex("[!！]{3,}"), "！！")
-    result = result.replace(Regex("[?？]{3,}"), "？？")
+    result = result.replace(Regex("[!！]{4,}"), "！！")
+    result = result.replace(Regex("[?？]{4,}"), "？？")
     // 压缩连续点号与省略号
-    result = result.replace(Regex("(?:\\.{3,}|…{2,}|[·・]{3,})"), "……")
+    result = result.replace(Regex("(?:\\.{4,}|…{3,}|[·・]{4,})"), "……")
+
+    // 针对汉字与假名：保留日漫中合法的拟声词与语气延长（如「あああ」「うわああ」「えええっ」「ハハハ」）！
+    // 仅当连续相同字符达到 6 次及以上（明确的模型退化循环）才压缩为保留 3 个！
+    result = result.replace(Regex("([\\u3040-\\u309F\\u30A0-\\u30FF\\u4E00-\\u9FFF])\\1{5,}"), "$1$1$1")
+
+    // 移除连续重复短语（短语长度 >= 3，如 "うちはそういうのうちはそういうの" -> "うちはそういうの"，保护 2 字合法拟声如「ドキドキ」）
+    result = removeDuplicatePhrases(result)
     return result
+  }
+
+  fun removeDuplicatePhrases(text: String): String {
+    if (text.isBlank()) return text
+    var result = text
+    // 移除连续重复的短语（长度 >= 3，如 "うちはそういうのうちはそういうの" -> "うちはそういうの"）
+    result = result.replace(Regex("([^\\s\\n]{3,15})\\s*\\1+"), "$1")
+    return result
+  }
+
+  fun hasExcessiveRepeats(text: String): Boolean {
+    // 短文本（如「あああ」「えええっ」长度 <= 6）是完全合法的拟声词或叹词，绝不能误判为退化！
+    if (text.length <= 6) return false
+    val charCounts = text.groupingBy { it }.eachCount()
+    val maxCount = charCounts.values.maxOrNull() ?: 0
+    // 仅当文本长度较长（>= 7）且单一字符重复出现超过 60% 时，才判定为退化死循环
+    return (maxCount.toFloat() / text.length) >= 0.60f
   }
 
   /**

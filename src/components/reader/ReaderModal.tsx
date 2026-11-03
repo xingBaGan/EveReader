@@ -52,6 +52,9 @@ export function ReaderModal() {
 
   const webViewRef = useRef<ReaderWebViewRef>(null);
   const isStreamingRef = useRef(false);
+  const nextReqIdRef = useRef(1);
+  const activeRequestIdRef = useRef(0);
+  const inFlightRequestRef = useRef(false);
   const [base64Content, setBase64Content] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -228,22 +231,76 @@ export function ReaderModal() {
         break;
 
       case 'requestBubbleDetection': {
+        const reqId = data.requestId || ++nextReqIdRef.current;
         const targetPage = data.pageNum || currentPage || 1;
+        const snapshotLen = data.snapshot ? data.snapshot.length : 0;
+
+        // In-flight 幂等防护：若当前请求正在进行，重复请求坚决丢弃，绝不发起重复 OCR
+        if (inFlightRequestRef.current && reqId <= activeRequestIdRef.current) {
+          console.warn(`[BubbleOCR] [ERROR_OR_CANCEL] Duplicate in-flight request dropped: reqId=${reqId}, active=${activeRequestIdRef.current}`);
+          break;
+        }
+
+        activeRequestIdRef.current = reqId;
+        inFlightRequestRef.current = true;
         setIsDetectingBubbles(true);
+
+        console.log(`[BubbleOCR] [JS_RECEIPT] reqId=${reqId}, page=${targetPage}, snapshotBytes=${snapshotLen}, width=${data.width}, height=${data.height}`);
+
+        let ackSent = false;
         detectBubblesForPage(targetPage, data.snapshot, data.width, data.height)
           .then((bubbles) => {
+            // 时序版本防护：若用户已翻页或发起了新请求，旧请求的识别结果坚决不覆盖当前页面
+            if (activeRequestIdRef.current !== reqId || (currentPage && targetPage !== currentPage)) {
+              console.warn(`[BubbleOCR] [ERROR_OR_CANCEL] Stale request result ignored: reqId=${reqId}, currentActive=${activeRequestIdRef.current}, reqPage=${targetPage}, currentPage=${currentPage}`);
+              webViewRef.current?.postMessage('detectionFailed', {
+                reason: 'stale',
+                requestId: reqId,
+              });
+              ackSent = true;
+              return;
+            }
+
+            console.log(`[BubbleOCR] [FINAL_RESULTS] reqId=${reqId}, page=${targetPage}, returned=${bubbles?.length ?? 0} bubbles`);
             if (bubbles && bubbles.length > 0) {
               setDetectedBubbles(bubbles);
               webViewRef.current?.postMessage('setDetectedBubbles', {
                 bubbles,
                 active: true,
+                requestId: reqId,
               });
+              ackSent = true;
+            } else {
+              // 成功但结果为空（合法 0 气泡）：明确清空 overlay，发送 detectionCompleted ACK 释放 WebView 锁
+              setDetectedBubbles([]);
+              webViewRef.current?.postMessage('detectionCompleted', {
+                bubbles: [],
+                active: true,
+                requestId: reqId,
+              });
+              ackSent = true;
             }
-            setIsDetectingBubbles(false);
           })
           .catch((err) => {
-            console.warn('[ReaderModal] 气泡检测流程异常:', err);
-            setIsDetectingBubbles(false);
+            console.error(`[BubbleOCR] [ERROR_OR_CANCEL] detectBubblesForPage error (reqId=${reqId}):`, err);
+            webViewRef.current?.postMessage('detectionFailed', {
+              reason: err?.message || 'detection_error',
+              requestId: reqId,
+            });
+            ackSent = true;
+          })
+          .finally(() => {
+            // 无论任何退出路径，finally 兜底确保向 WebView 回传终态 ACK 释放对应请求锁
+            if (!ackSent) {
+              webViewRef.current?.postMessage('detectionFailed', {
+                reason: 'finally_fallback',
+                requestId: reqId,
+              });
+            }
+            if (activeRequestIdRef.current === reqId) {
+              inFlightRequestRef.current = false;
+              setIsDetectingBubbles(false);
+            }
           });
         break;
       }
@@ -270,23 +327,31 @@ export function ReaderModal() {
     }
   }, [settings, isTxt]);
 
-  // Sync bubble detection state to WebView
+  // Sync bubble detection state to WebView (唯一由状态驱动的同步入口，绝不重复派发 runBubbleDetection)
   useEffect(() => {
     if (isPdf && webViewRef.current) {
+      const reqId = ++nextReqIdRef.current;
       webViewRef.current.postMessage('toggleBubbleDetection', {
         active: isBubbleDetectActive,
+        requestId: reqId,
       });
     }
   }, [isBubbleDetectActive, isPdf]);
 
   const handleToggleBubbleDetect = () => {
-    toggleBubbleDetection();
+    const nextActive = !isBubbleDetectActive;
+    console.log(`[BubbleOCR] [JS_CLICK_ENTRY] handleToggleBubbleDetect clicked, nextActive=${nextActive}, isPdf=${isPdf}`);
+    toggleBubbleDetection(nextActive);
   };
 
   const handleRefreshBubbleDetect = () => {
+    console.log(`[BubbleOCR] [JS_CLICK_ENTRY] handleRefreshBubbleDetect clicked, isPdf=${isPdf}`);
     if (isPdf && webViewRef.current) {
+      const reqId = ++nextReqIdRef.current;
       setIsDetectingBubbles(true);
-      webViewRef.current.postMessage('runBubbleDetection');
+      webViewRef.current.postMessage('runBubbleDetection', {
+        requestId: reqId,
+      });
     }
   };
 

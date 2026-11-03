@@ -7,37 +7,60 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.RectF
 import android.util.Log
+import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.nio.FloatBuffer
-import java.nio.LongBuffer
+import kotlin.math.ceil
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
- * 漫画专用端侧文本识别模型 (Manga-OCR Mobile)
- * 基于 ogkalu/manga-ocr-mobile 轻量化 ViT+Transformer 架构
- * 专攻日漫全场景复杂汉字、竖排气泡、多列排版、手写拟声词(SFX)、变形艺术字识别！
+ * 字符级坐标与原生阅读顺序漫画 OCR 模型 (Manga-OCR CharSpot Small)
+ * 基于 muscgab/manga-ocr-charspot-small (11M 参数，单图单会话 ONNX 架构)
  *
- * 模型包含：
- * 1. ViT 图像编码器 (manga_ocr_encoder.onnx, 16MB) -> 提取图像 Patch 特征 [1, 196, 256]
- * 2. 解码器首步预测 (manga_ocr_decoder_init.onnx, 24MB) -> 首字符预测及 KV Cache 初始化
- * 3. 解码器自回归循环 (manga_ocr_decoder_step.onnx, 22MB) -> 极速逐字自回归解码
- * 4. 日文字符字典 (manga_ocr_vocab.txt, 9415 字表)
+ * 核心特性：
+ * 1. 单次前向同时输出：字符包围盒 (boxes)、置信度 (scores)、类别索引 (ids)、阅读顺序 (order)
+ * 2. 模型内部排序头原生习得多列竖排从右向左、从上至下的标准日漫阅读顺序
+ * 3. 彻底告别自回归 KV-Cache 循环与无中生有大段幻觉，单框推理进入 25ms 时代！
  */
 object MangaOcrModel {
 
   private const val TAG = "MangaOcrModel"
-  private const val INPUT_SIZE = 224
+  private const val MODEL_ASSET_PATH = "models/manga_ocr_charspot_small.onnx"
+  private const val VOCAB_ASSET_PATH = "models/charspot_vocab.json"
+  private const val TARGET_MODEL_FILE = "manga_ocr_charspot_small.onnx"
+
+  private const val CELL = 16
+  private const val BUDGET = 256
+  private const val N_CLS = 6818
+
+  // 漫画竖排常用叠标标点组合 (tate-chu-yoko !? glyphs)
+  private val COMBOS = listOf(
+    "!!", "!?", "?!", "??",
+    "!!!", "!!?", "!?!", "!??", "?!!", "?!?", "??!", "???"
+  )
+
+  data class CharBox(
+    val char: String,
+    val score: Float,
+    val box: RectF
+  )
+
+  data class OcrResult(
+    val text: String,
+    val chars: List<CharBox>,
+    val avgScore: Float
+  )
 
   private var ortEnv: OrtEnvironment? = null
-  private var encoderSession: OrtSession? = null
-  private var decoderInitSession: OrtSession? = null
-  private var decoderStepSession: OrtSession? = null
-
-  private val vocabList = ArrayList<String>(9500)
+  private var ortSession: OrtSession? = null
+  private val vocabList = ArrayList<String>(6850)
 
   @Volatile
   private var isInitialized = false
@@ -58,91 +81,106 @@ object MangaOcrModel {
   var appContext: Context? = null
 
   /**
-   * 初始化 Manga-OCR Mobile ONNX 推理环境与三阶段模型会话
+   * 初始化 CharSpot ONNX 推理环境与单会话
    */
   @Synchronized
   fun init(context: Context): Boolean {
-    if (isInitialized && isModelReady) return true
+    if (isInitialized && isModelReady && ortSession != null) return true
     appContext = context.applicationContext
 
     return try {
-      statusMessage = "⏳ 正在初始化 Manga-OCR 运行环境..."
+      statusMessage = "⏳ 正在初始化 CharSpot 漫画 OCR 运行环境..."
       val env = OrtEnvironment.getEnvironment()
       ortEnv = env
 
       val sessionOptions = OrtSession.SessionOptions().apply {
-        setInterOpNumThreads(2)
-        setIntraOpNumThreads(2)
+        setInterOpNumThreads(1)
+        setIntraOpNumThreads(min(4, Runtime.getRuntime().availableProcessors()))
+        setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
       }
 
       // 1. 加载字表
       loadVocab(context)
 
-      // 2. 依次加载编码器与两级解码器
-      val encoderFile = copyAssetIfNeeded(context, "models/manga_ocr_encoder.onnx", "manga_ocr_encoder.onnx")
-      val decInitFile = copyAssetIfNeeded(context, "models/manga_ocr_decoder_init.onnx", "manga_ocr_decoder_init.onnx")
-      val decStepFile = copyAssetIfNeeded(context, "models/manga_ocr_decoder_step.onnx", "manga_ocr_decoder_step.onnx")
-
-      if (encoderFile == null || decInitFile == null || decStepFile == null) {
-        val err = "缺少 Manga-OCR 模型文件，跳过加载"
+      // 2. 加载单图 CharSpot ONNX 模型
+      val modelFile = copyAssetIfNeeded(context, MODEL_ASSET_PATH, TARGET_MODEL_FILE)
+      if (modelFile == null || !modelFile.exists() || modelFile.length() < 10000000L) {
+        val err = "缺少 CharSpot 模型文件 ($MODEL_ASSET_PATH)，跳过加载"
         Log.w(TAG, err)
         statusMessage = "❌ $err"
         return false
       }
 
-      Log.i(TAG, "Loading Manga-OCR ONNX sessions...")
-      encoderSession = env.createSession(encoderFile.absolutePath, sessionOptions)
-      decoderInitSession = env.createSession(decInitFile.absolutePath, sessionOptions)
-      decoderStepSession = env.createSession(decStepFile.absolutePath, sessionOptions)
+      Log.i(TAG, "Loading CharSpot ONNX session from ${modelFile.absolutePath} (${modelFile.length() / 1024} KB)...")
+      ortSession = env.createSession(modelFile.absolutePath, sessionOptions)
 
       isInitialized = true
       isModelReady = true
-      statusMessage = "✅ 漫画端侧 OCR 识别模型就绪 (Manga-OCR Mobile)"
+      statusMessage = "✅ 漫画端侧 OCR 模型就绪 (CharSpot-Small)"
       Log.i(TAG, "MangaOcrModel initialized successfully! Vocab size: ${vocabList.size}")
       true
     } catch (e: Exception) {
-      val err = "Manga-OCR 初始化失败: ${e.message}"
+      val err = "CharSpot 初始化失败: ${e.message}"
       Log.e(TAG, err, e)
       statusMessage = "❌ $err"
       false
     }
   }
 
+  /**
+   * 加载 CharSpot 字典与特殊标点字符映射
+   */
   private fun loadVocab(context: Context) {
     if (vocabList.isNotEmpty()) return
     try {
-      val candidates = listOf("models/manga_ocr_vocab.txt", "manga_ocr_vocab.txt", "vocab.txt")
-      var stream: java.io.InputStream? = null
+      val candidates = listOf(VOCAB_ASSET_PATH, "charspot_vocab.json", "vocab.json")
+      var jsonStr: String? = null
       for (c in candidates) {
         try {
-          stream = context.assets.open(c)
-          break
+          context.assets.open(c).use { stream ->
+            BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
+              jsonStr = reader.readText()
+            }
+          }
+          if (jsonStr != null) break
         } catch (e: Exception) {}
       }
-      if (stream == null) {
-        val targetFile = File(context.filesDir, "manga_ocr_vocab.txt")
-        if (targetFile.exists()) {
-          stream = targetFile.inputStream()
+
+      if (jsonStr == null) {
+        val localFile = File(context.filesDir, "charspot_vocab.json")
+        if (localFile.exists()) {
+          jsonStr = localFile.readText(Charsets.UTF_8)
         }
       }
-      if (stream != null) {
-        BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
-          var line = reader.readLine()
-          while (line != null) {
-            vocabList.add(line.trim('\r', '\n'))
-            line = reader.readLine()
-          }
+
+      if (jsonStr != null) {
+        val root = JSONObject(jsonStr!!)
+        val charsArray = root.getJSONArray("characters")
+        val loadedChars = ArrayList<String>(charsArray.length() + 30)
+        for (i in 0 until charsArray.length()) {
+          loadedChars.add(charsArray.getString(i))
         }
-        Log.i(TAG, "Loaded ${vocabList.size} vocab tokens")
+
+        vocabList.clear()
+        vocabList.addAll(loadedChars)
+        // 补齐至 n_cls (6818)
+        while (vocabList.size < N_CLS) {
+          vocabList.add("")
+        }
+        // 追加 COMBOS (12 个双/三重感叹问号字符)
+        vocabList.addAll(COMBOS)
+        Log.i(TAG, "Loaded ${vocabList.size} vocab tokens (characters: ${loadedChars.size}, total with combos: ${vocabList.size})")
+      } else {
+        Log.e(TAG, "Failed to find charspot_vocab.json asset!")
       }
     } catch (e: Exception) {
-      Log.e(TAG, "Failed to load vocab", e)
+      Log.e(TAG, "Failed to load charspot vocab", e)
     }
   }
 
   private fun copyAssetIfNeeded(context: Context, assetPath: String, targetFileName: String): File? {
     val targetFile = File(context.filesDir, targetFileName)
-    if (targetFile.exists() && targetFile.length() > 5000000L) {
+    if (targetFile.exists() && targetFile.length() > 20000000L) {
       return targetFile
     }
 
@@ -174,253 +212,250 @@ object MangaOcrModel {
   }
 
   /**
-   * 端侧推理：对漫画文本/气泡切片进行端侧日漫 OCR 高精度识别
-   * @param cropBitmap 包含气泡或艺术字/拟声词的原始图像切片
-   * @param maxSteps 最大解码字符步数 (默认 35)
-   * @return 识别出的日文文本，若未识别或置信度过低返回空字符串
+   * 动态网格缩放比例搜索算法 (padGrid)
+   * 寻找在 14px 网格下不超过 budget cells (256) 的最大缩放因子，
+   * 最终在 16px 单元格尺寸下建立贴合纵横比的最优画布。
    */
-  fun recognize(cropBitmap: Bitmap, maxSteps: Int = 35): String {
-    val ctx = appContext ?: return ""
-    if (!isInitialized && !init(ctx)) return ""
+  private fun padGrid(height: Int, width: Int, budget: Int = BUDGET): Triple<Float, Int, Int> {
+    var lo = 1e-4f
+    var hi = 1000.0f
+    for (i in 0 until 60) {
+      val mid = (lo + hi) / 2f
+      val gh = ceil(height * mid / 14f).toInt()
+      val gw = ceil(width * mid / 14f).toInt()
+      if (gh * gw <= budget) {
+        lo = mid
+      } else {
+        hi = mid
+      }
+    }
+    val scale = lo * CELL / 14f
+    val gridH = ceil(height * lo / 14f).toInt()
+    val gridW = ceil(width * lo / 14f).toInt()
+    return Triple(scale, gridH, gridW)
+  }
 
-    val env = ortEnv ?: return ""
-    val encSess = encoderSession ?: return ""
-    val initSess = decoderInitSession ?: return ""
-    val stepSess = decoderStepSession ?: return ""
+  /**
+   * 计算四边像素的中位数颜色 (Median Border Color)
+   */
+  private fun calculateMedianBorderColor(bitmap: Bitmap, rw: Int, rh: Int): Int {
+    val borderR = ArrayList<Int>((rw + rh) * 2)
+    val borderG = ArrayList<Int>((rw + rh) * 2)
+    val borderB = ArrayList<Int>((rw + rh) * 2)
 
-    if (cropBitmap.width < 10 || cropBitmap.height < 10) return ""
+    for (x in 0 until rw) {
+      val pTop = bitmap.getPixel(x, 0)
+      borderR.add(Color.red(pTop))
+      borderG.add(Color.green(pTop))
+      borderB.add(Color.blue(pTop))
+
+      val pBottom = bitmap.getPixel(x, rh - 1)
+      borderR.add(Color.red(pBottom))
+      borderG.add(Color.green(pBottom))
+      borderB.add(Color.blue(pBottom))
+    }
+
+    for (y in 0 until rh) {
+      val pLeft = bitmap.getPixel(0, y)
+      borderR.add(Color.red(pLeft))
+      borderG.add(Color.green(pLeft))
+      borderB.add(Color.blue(pLeft))
+
+      val pRight = bitmap.getPixel(rw - 1, y)
+      borderR.add(Color.red(pRight))
+      borderG.add(Color.green(pRight))
+      borderB.add(Color.blue(pRight))
+    }
+
+    borderR.sort()
+    borderG.sort()
+    borderB.sort()
+
+    val mid = borderR.size / 2
+    return Color.rgb(borderR[mid], borderG[mid], borderB[mid])
+  }
+
+  /**
+   * 端侧推理核心：对漫画文本/气泡切片进行 CharSpot 单次前向识别
+   * @param cropBitmap 原始切片图像 (Bitmap)
+   * @return 包含文本、字符级坐标、各字符置信度与平均得分的 OcrResult
+   */
+  fun recognizeDetail(cropBitmap: Bitmap): OcrResult {
+    val ctx = appContext ?: return OcrResult("", emptyList(), 0f)
+    if (!isInitialized && !init(ctx)) return OcrResult("", emptyList(), 0f)
+
+    val env = ortEnv ?: return OcrResult("", emptyList(), 0f)
+    val session = ortSession ?: return OcrResult("", emptyList(), 0f)
+
+    if (cropBitmap.width < 8 || cropBitmap.height < 8) {
+      return OcrResult("", emptyList(), 0f)
+    }
 
     val startTime = System.currentTimeMillis()
 
-    var squareBmp: Bitmap? = null
     var scaledBmp: Bitmap? = null
-
+    var paddedBmp: Bitmap? = null
     var imgTensor: OnnxTensor? = null
-    var encResults: OrtSession.Result? = null
-    var initInputIds: OnnxTensor? = null
-    var initResults: OrtSession.Result? = null
+    var runResults: OrtSession.Result? = null
 
     return try {
-      // 1. 等比正方形填充：根据 4 角点自适应采样填充底色，避免破坏文字长宽比例与产生强烈伪边框
-      val maxDim = max(cropBitmap.width, cropBitmap.height)
-      squareBmp = Bitmap.createBitmap(maxDim, maxDim, Bitmap.Config.ARGB_8888)
-      val canvas = Canvas(squareBmp)
-      val w = cropBitmap.width
-      val h = cropBitmap.height
-      val c1 = cropBitmap.getPixel(0, 0)
-      val c2 = cropBitmap.getPixel(w - 1, 0)
-      val c3 = cropBitmap.getPixel(0, h - 1)
-      val c4 = cropBitmap.getPixel(w - 1, h - 1)
-      val avgR = (Color.red(c1) + Color.red(c2) + Color.red(c3) + Color.red(c4)) / 4
-      val avgG = (Color.green(c1) + Color.green(c2) + Color.green(c3) + Color.green(c4)) / 4
-      val avgB = (Color.blue(c1) + Color.blue(c2) + Color.blue(c3) + Color.blue(c4)) / 4
-      val padColor = Color.rgb(avgR, avgG, avgB)
+      val origW = cropBitmap.width
+      val origH = cropBitmap.height
+
+      // 1. 动态网格等比尺度与画布大小推导
+      val (scale, gh, gw) = padGrid(origH, origW)
+      val canvasW = gw * CELL
+      val canvasH = gh * CELL
+
+      val rw = max(1, min(canvasW, (origW * scale).roundToInt()))
+      val rh = max(1, min(canvasH, (origH * scale).roundToInt()))
+
+      // 2. 双线性平滑缩放至 (rw, rh)
+      scaledBmp = Bitmap.createScaledBitmap(cropBitmap, rw, rh, true)
+
+      // 3. 计算四周边界中位数底色，填充画布避免边界硬截断伪影
+      val padColor = calculateMedianBorderColor(scaledBmp, rw, rh)
+      paddedBmp = Bitmap.createBitmap(canvasW, canvasH, Bitmap.Config.ARGB_8888)
+      val canvas = Canvas(paddedBmp)
       canvas.drawColor(padColor)
-      val left = (maxDim - cropBitmap.width) / 2f
-      val top = (maxDim - cropBitmap.height) / 2f
-      canvas.drawBitmap(cropBitmap, left, top, null)
+      canvas.drawBitmap(scaledBmp, 0f, 0f, null)
 
-      // 2. 缩放到模型标准输入尺寸 224x224
-      scaledBmp = Bitmap.createScaledBitmap(squareBmp, INPUT_SIZE, INPUT_SIZE, true)
-
-      // 3. 构建 [1, 3, 224, 224] 归一化 FloatBuffer: (x / 255.0 - 0.5) / 0.5
-      val totalPixels = INPUT_SIZE * INPUT_SIZE
+      // 4. 构建 FloatBuffer [1, 3, canvasH, canvasW] (注意：模型需要 raw 0-255 RGB 像素浮点值！)
+      val totalPixels = canvasW * canvasH
       val pixels = IntArray(totalPixels)
-      scaledBmp.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+      paddedBmp.getPixels(pixels, 0, canvasW, 0, 0, canvasW, canvasH)
 
       val floatBuffer = FloatBuffer.allocate(1 * 3 * totalPixels)
+      // Channel R
       for (i in 0 until totalPixels) {
-        val r = (pixels[i] shr 16 and 0xFF) / 255.0f
-        floatBuffer.put((r - 0.5f) / 0.5f)
+        floatBuffer.put((pixels[i] shr 16 and 0xFF).toFloat())
       }
+      // Channel G
       for (i in 0 until totalPixels) {
-        val g = (pixels[i] shr 8 and 0xFF) / 255.0f
-        floatBuffer.put((g - 0.5f) / 0.5f)
+        floatBuffer.put((pixels[i] shr 8 and 0xFF).toFloat())
       }
+      // Channel B
       for (i in 0 until totalPixels) {
-        val b = (pixels[i] and 0xFF) / 255.0f
-        floatBuffer.put((b - 0.5f) / 0.5f)
+        floatBuffer.put((pixels[i] and 0xFF).toFloat())
       }
       floatBuffer.rewind()
 
-      imgTensor = OnnxTensor.createTensor(env, floatBuffer, longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong()))
-
-      // 4. 执行 ViT 编码器: [1, 3, 224, 224] -> [1, 196, 256]
-      val encInputName = encSess.inputNames.first()
-      encResults = encSess.run(mapOf(encInputName to imgTensor))
-
-      var encHiddenStates: OnnxTensor? = null
-      for (entry in encResults) {
-        encHiddenStates = entry.value as? OnnxTensor
-        if (encHiddenStates != null) break
-      }
-      if (encHiddenStates == null) return ""
-
-      // 5. 执行解码器首步初始化 (start token = 2, 即 [CLS])
-      initInputIds = OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(2L)), longArrayOf(1, 1))
-      val initInputs = mapOf(
-        "encoder_hidden_states" to encHiddenStates,
-        "input_ids" to initInputIds
+      imgTensor = OnnxTensor.createTensor(
+        env,
+        floatBuffer,
+        longArrayOf(1, 3, canvasH.toLong(), canvasW.toLong())
       )
-      initResults = initSess.run(initInputs)
 
-      var logitsTensor: OnnxTensor? = null
-      var selfKTensor: OnnxTensor? = null
-      var selfVTensor: OnnxTensor? = null
-      var crossKTensor: OnnxTensor? = null
-      var crossVTensor: OnnxTensor? = null
+      // 5. 单次前向推理：直接产出 boxes, scores, ids, order
+      runResults = session.run(mapOf("img" to imgTensor))
 
-      for (entry in initResults) {
+      var boxesTensor: OnnxTensor? = null
+      var scoresTensor: OnnxTensor? = null
+      var idsTensor: OnnxTensor? = null
+      var orderTensor: OnnxTensor? = null
+
+      for (entry in runResults) {
         when (entry.key) {
-          "logits" -> logitsTensor = entry.value as? OnnxTensor
-          "self_k" -> selfKTensor = entry.value as? OnnxTensor
-          "self_v" -> selfVTensor = entry.value as? OnnxTensor
-          "cross_k" -> crossKTensor = entry.value as? OnnxTensor
-          "cross_v" -> crossVTensor = entry.value as? OnnxTensor
+          "boxes" -> boxesTensor = entry.value as? OnnxTensor
+          "scores" -> scoresTensor = entry.value as? OnnxTensor
+          "ids" -> idsTensor = entry.value as? OnnxTensor
+          "order" -> orderTensor = entry.value as? OnnxTensor
         }
       }
 
-      if (logitsTensor == null || selfKTensor == null || selfVTensor == null ||
-          crossKTensor == null || crossVTensor == null) {
-        return ""
+      if (boxesTensor == null || scoresTensor == null || idsTensor == null || orderTensor == null) {
+        Log.w(TAG, "CharSpot ONNX outputs missing required nodes")
+        return OcrResult("", emptyList(), 0f)
       }
 
-      // 初始化 KV Cache (4 层 * 1 批 * 4 头 * 256 步 * 64 维 = 262,144 floats)
-      val selfKCache = FloatArray(4 * 1 * 4 * 256 * 64)
-      val selfVCache = FloatArray(4 * 1 * 4 * 256 * 64)
+      val orderLongs = orderTensor.longBuffer
+      val numChars = orderLongs.remaining()
+      if (numChars == 0) {
+        return OcrResult("", emptyList(), 0f)
+      }
 
-      val initKBuf = selfKTensor.floatBuffer
-      val initVBuf = selfVTensor.floatBuffer
-      val initKArray = FloatArray(1024)
-      val initVArray = FloatArray(1024)
-      initKBuf.get(initKArray)
-      initVBuf.get(initVArray)
+      val orderArray = LongArray(numChars)
+      orderLongs.get(orderArray)
 
-      // 将首步 self_k 与 self_v 写入缓存索引 0 处
-      for (layer in 0 until 4) {
-        for (head in 0 until 4) {
-          val srcOffset = (layer * 4 + head) * 64
-          val dstOffset = (layer * 4 + head) * 256 * 64 + 0 * 64
-          System.arraycopy(initKArray, srcOffset, selfKCache, dstOffset, 64)
-          System.arraycopy(initVArray, srcOffset, selfVCache, dstOffset, 64)
+      val boxesBuf = boxesTensor.floatBuffer
+      val totalBoxesVals = boxesBuf.remaining()
+      val boxesArray = FloatArray(totalBoxesVals)
+      boxesBuf.get(boxesArray)
+
+      val scoresBuf = scoresTensor.floatBuffer
+      val scoresArray = FloatArray(scoresBuf.remaining())
+      scoresBuf.get(scoresArray)
+
+      val idsBuf = idsTensor.longBuffer
+      val idsArray = LongArray(idsBuf.remaining())
+      idsBuf.get(idsArray)
+
+      // 6. 坐标映射因子：模型输入图像像素坐标 -> 原 cropBitmap 像素坐标
+      val fx = origW.toFloat() / rw.toFloat()
+      val fy = origH.toFloat() / rh.toFloat()
+
+      val charBoxes = ArrayList<CharBox>(numChars)
+      val sb = StringBuilder(numChars)
+
+      // 7. 按照 order 预测顺序逐字还原（原生具备多列从右至左、自上而下阅读顺序）
+      for (i in 0 until numChars) {
+        val k = orderArray[i].toInt()
+        if (k < 0 || k >= scoresArray.size || k >= idsArray.size) continue
+
+        val charId = idsArray[k].toInt()
+        val charStr = if (charId in 0 until vocabList.size) vocabList[charId] else ""
+        if (charStr.isEmpty()) continue
+
+        val score = scoresArray[k]
+
+        // 提取 [x0, y0, x1, y1]
+        val bOffset = k * 4
+        if (bOffset + 3 < boxesArray.size) {
+          val x0 = boxesArray[bOffset] * fx
+          val y0 = boxesArray[bOffset + 1] * fy
+          val x1 = boxesArray[bOffset + 2] * fx
+          val y1 = boxesArray[bOffset + 3] * fy
+          val rectF = RectF(
+            max(0f, min(origW.toFloat(), x0)),
+            max(0f, min(origH.toFloat(), y0)),
+            max(0f, min(origW.toFloat(), x1)),
+            max(0f, min(origH.toFloat(), y1))
+          )
+          charBoxes.add(CharBox(char = charStr, score = score, box = rectF))
+        } else {
+          charBoxes.add(CharBox(char = charStr, score = score, box = RectF(0f, 0f, 0f, 0f)))
         }
-      }
 
-      val logitsBuf = logitsTensor.floatBuffer
-      val firstLogits = FloatArray(logitsBuf.remaining())
-      logitsBuf.get(firstLogits)
-      var currToken = argmax(firstLogits)
-
-      val predictedTokens = mutableListOf<Int>()
-      if (currToken != 3) {
-        predictedTokens.add(currToken)
-      }
-
-      // 6. 执行自回归解码循环 (每次输入前序预测 token，更新 KV Cache，直至遇到 [SEP]=3 或达到最大步数)
-      for (step in 1 until maxSteps) {
-        if (currToken == 3) break // [SEP] 终止符
-
-        val pos = (step + 1).toLong()
-        val stepInputIds = OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(currToken.toLong())), longArrayOf(1, 1))
-        val stepPosIds = OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(pos)), longArrayOf(1, 1))
-        val stepKCacheTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(selfKCache), longArrayOf(4, 1, 4, 256, 64))
-        val stepVCacheTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(selfVCache), longArrayOf(4, 1, 4, 256, 64))
-
-        val stepInputs = mapOf(
-          "encoder_hidden_states" to encHiddenStates,
-          "input_ids" to stepInputIds,
-          "position_ids" to stepPosIds,
-          "self_k_cache" to stepKCacheTensor,
-          "self_v_cache" to stepVCacheTensor,
-          "cross_k_cache" to crossKTensor,
-          "cross_v_cache" to crossVTensor
-        )
-
-        val stepResults = stepSess.run(stepInputs)
-        try {
-          var stepLogitsTensor: OnnxTensor? = null
-          var kSliceTensor: OnnxTensor? = null
-          var vSliceTensor: OnnxTensor? = null
-
-          for (entry in stepResults) {
-            when (entry.key) {
-              "logits" -> stepLogitsTensor = entry.value as? OnnxTensor
-              "self_k_slice" -> kSliceTensor = entry.value as? OnnxTensor
-              "self_v_slice" -> vSliceTensor = entry.value as? OnnxTensor
-            }
-          }
-
-          if (stepLogitsTensor == null || kSliceTensor == null || vSliceTensor == null) {
-            break
-          }
-
-          val kSliceArray = FloatArray(1024)
-          val vSliceArray = FloatArray(1024)
-          kSliceTensor.floatBuffer.get(kSliceArray)
-          vSliceTensor.floatBuffer.get(vSliceArray)
-
-          // 将本步新增的 k/v 切片写入缓存 step 处
-          for (layer in 0 until 4) {
-            for (head in 0 until 4) {
-              val srcOffset = (layer * 4 + head) * 64
-              val dstOffset = (layer * 4 + head) * 256 * 64 + step * 64
-              System.arraycopy(kSliceArray, srcOffset, selfKCache, dstOffset, 64)
-              System.arraycopy(vSliceArray, srcOffset, selfVCache, dstOffset, 64)
-            }
-          }
-
-          val sBuf = stepLogitsTensor.floatBuffer
-          val stepLogitsArray = FloatArray(sBuf.remaining())
-          sBuf.get(stepLogitsArray)
-          currToken = argmax(stepLogitsArray)
-
-          if (currToken == 3) break
-          predictedTokens.add(currToken)
-        } finally {
-          stepInputIds.close()
-          stepPosIds.close()
-          stepKCacheTensor.close()
-          stepVCacheTensor.close()
-          stepResults.close()
-        }
-      }
-
-      // 7. 将 Token 序列映射为真实日文字符串
-      val sb = StringBuilder()
-      for (tok in predictedTokens) {
-        if (tok in 0..3) continue // 忽略 [PAD], [UNK], [CLS], [SEP]
-        if (tok < vocabList.size) {
-          sb.append(vocabList[tok])
-        }
+        sb.append(charStr)
       }
 
       val duration = System.currentTimeMillis() - startTime
       lastInferenceTimeMs = duration
-      val resultText = sb.toString().trim()
-      Log.i(TAG, "Manga-OCR 识别出文本: '$resultText' (共 ${predictedTokens.size} 字, 耗时 ${duration}ms)")
-      resultText
+
+      val finalText = sb.toString().trim()
+      val avgScore = if (charBoxes.isNotEmpty()) {
+        charBoxes.map { it.score }.average().toFloat()
+      } else {
+        0f
+      }
+
+      Log.i(TAG, "CharSpot OCR output: '$finalText' (chars=${charBoxes.size}, avgScore=$avgScore, time=${duration}ms)")
+      OcrResult(text = finalText, chars = charBoxes, avgScore = avgScore)
     } catch (e: Exception) {
-      Log.e(TAG, "Manga-OCR recognition error", e)
-      ""
+      Log.e(TAG, "CharSpot recognition error", e)
+      OcrResult("", emptyList(), 0f)
     } finally {
       try { imgTensor?.close() } catch (e: Exception) {}
-      try { encResults?.close() } catch (e: Exception) {}
-      try { initInputIds?.close() } catch (e: Exception) {}
-      try { initResults?.close() } catch (e: Exception) {}
-      try { squareBmp?.recycle() } catch (e: Exception) {}
+      try { runResults?.close() } catch (e: Exception) {}
       try { scaledBmp?.recycle() } catch (e: Exception) {}
+      try { paddedBmp?.recycle() } catch (e: Exception) {}
     }
   }
 
-  private fun argmax(array: FloatArray): Int {
-    var maxIdx = 0
-    var maxVal = array[0]
-    for (i in 1 until array.size) {
-      if (array[i] > maxVal) {
-        maxVal = array[i]
-        maxIdx = i
-      }
-    }
-    return maxIdx
+  /**
+   * 兼容旧接口：快速返回识别出的日文字符串
+   */
+  fun recognize(cropBitmap: Bitmap): String {
+    return recognizeDetail(cropBitmap).text
   }
 }

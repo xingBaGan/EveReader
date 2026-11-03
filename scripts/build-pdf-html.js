@@ -280,21 +280,42 @@ ${pdfJsCode}
         });
       }
 
-      function requestDetection(canvasEl) {
+      var isSnapshotInFlight = false;
+      var activeDetectionReqId = 0;
+
+      function requestDetection(canvasEl, incomingReqId) {
         var cv = canvasEl || document.querySelector('canvas');
-        if (!cv) return;
+        if (!cv) {
+          console.warn('[BubbleOCR] [SNAPSHOT_FAILED] Canvas not found on page ' + currentPageNum);
+          return;
+        }
+        if (isSnapshotInFlight) {
+          console.warn('[BubbleOCR] [SNAPSHOT_SKIPPED] snapshot already in flight');
+          return;
+        }
+        isSnapshotInFlight = true;
+        var reqId = incomingReqId || (++activeDetectionReqId);
+        activeDetectionReqId = reqId;
+
+        var t0 = Date.now();
+        console.log('[BubbleOCR] [SNAPSHOT_START] reqId=' + reqId + ', page=' + currentPageNum + ', size=' + cv.width + 'x' + cv.height);
         try {
           var snapshot = cv.toDataURL('image/jpeg', 0.90);
+          console.log('[BubbleOCR] [SNAPSHOT_COMPLETE] reqId=' + reqId + ', bytes=' + snapshot.length + ' in ' + (Date.now() - t0) + 'ms');
           sendToParent({
             type: 'requestBubbleDetection',
+            requestId: reqId,
             pageNum: currentPageNum,
             snapshot: snapshot,
             width: cv.width,
             height: cv.height
           });
         } catch (e) {
+          isSnapshotInFlight = false;
+          console.error('[BubbleOCR] [SNAPSHOT_ERROR] ' + e.message);
           sendToParent({
             type: 'requestBubbleDetection',
+            requestId: reqId,
             pageNum: currentPageNum,
             width: cv.width,
             height: cv.height
@@ -476,59 +497,112 @@ ${pdfJsCode}
         }
       };
 
+      function handleIncomingAction(data) {
+        if (!data || !data.action) return;
+
+        if (data.action === 'initPdfStream') {
+          totalExpectedBytes = data.totalBytes;
+          assembledChunks = new Uint8Array(data.totalBytes);
+          bytesReceived = 0;
+          document.getElementById('loading-text').innerText = '正在载入内容 (0%)...';
+        } else if (data.action === 'appendPdfChunk') {
+          var binary = atob(data.chunkData);
+          var len = binary.length;
+          for (var i = 0; i < len; i++) {
+            assembledChunks[bytesReceived + i] = binary.charCodeAt(i);
+          }
+          bytesReceived += len;
+          var pct = Math.min(100, Math.round((bytesReceived / totalExpectedBytes) * 100));
+          document.getElementById('loading-text').innerText = '正在载入内容 (' + pct + '%)...';
+
+          if (data.isLastChunk) {
+            document.getElementById('loading-text').innerText = '正在解析文档与漫画...';
+            window.PdfReaderApi.loadFromUint8Array(assembledChunks, data.initialPage, data.theme);
+          }
+        } else if (data.action === 'nextPage') {
+          window.PdfReaderApi.nextPage();
+        } else if (data.action === 'prevPage') {
+          window.PdfReaderApi.prevPage();
+        } else if (data.action === 'goToPage') {
+          window.PdfReaderApi.goToPage(data.pageNum);
+        } else if (data.action === 'goToProgress') {
+          window.PdfReaderApi.goToProgress(data.progress);
+        } else if (data.action === 'applySettings') {
+          window.PdfReaderApi.applySettings(data.settings);
+        } else if (data.action === 'setDetectedBubbles' || data.action === 'detectionCompleted') {
+          // 时序与版本保护：只有匹配当前 activeDetectionReqId 的 ACK 才能释放锁并更新 overlay
+          // 旧 request 的迟到 ACK 严禁解锁新请求！
+          if (data.requestId && activeDetectionReqId && data.requestId !== activeDetectionReqId) {
+            console.warn('[BubbleOCR] [STALE_ACK_DROPPED] reqId=' + data.requestId + ' does not match activeReqId=' + activeDetectionReqId);
+            return;
+          }
+          isSnapshotInFlight = false;
+          currentBubbles = data.bubbles || [];
+          isBubbleDetectionActive = Boolean(data.active !== undefined ? data.active : true);
+          // 明确清空/更新 overlay，0 结果时清空旧定位框，绝不沉默残留！
+          renderBubbleOverlay(currentBubbles, isBubbleDetectionActive);
+        } else if (data.action === 'detectionFailed') {
+          // 异常、stale 或兜底失败 ACK：释放对应 request 的锁
+          if (data.requestId && activeDetectionReqId && data.requestId !== activeDetectionReqId) {
+            console.warn('[BubbleOCR] [STALE_ACK_DROPPED] detectionFailed reqId=' + data.requestId + ' does not match activeReqId=' + activeDetectionReqId);
+            return;
+          }
+          isSnapshotInFlight = false;
+          console.warn('[BubbleOCR] [ACK_FAILED] detectionFailed received for reqId=' + data.requestId + ', reason=' + (data.reason || 'unknown'));
+        } else if (data.action === 'toggleBubbleDetection') {
+          isBubbleDetectionActive = Boolean(data.active);
+          if (isBubbleDetectionActive) {
+            requestDetection(null, data.requestId);
+          } else {
+            // 关闭检测终态：释放锁并清空 overlay
+            isSnapshotInFlight = false;
+            currentBubbles = [];
+            renderBubbleOverlay([], false);
+          }
+        } else if (data.action === 'runBubbleDetection') {
+          isBubbleDetectionActive = true;
+          requestDetection(null, data.requestId);
+        }
+      }
+
+      var lastMessageTime = 0;
+      var lastMessageFingerprint = '';
+
+      // 仅对“气泡检测开关”类动作做重复投递防抖；
+      // appendPdfChunk / initPdfStream / 翻页等动作是高频数据流，绝对不能去重！
+      var dedupActions = {
+        toggleBubbleDetection: 1,
+        runBubbleDetection: 1
+      };
+
+      function dispatchActionSafely(data) {
+        if (!data || !data.action) return;
+        if (dedupActions[data.action] === 1) {
+          var fp = data.action + '_' + (data.active !== undefined ? data.active : '') + '_' + (data.requestId || '');
+          var now = Date.now();
+          // 幂等防抖保护：80ms 内相同 action 的重复消息直接过滤
+          if (fp === lastMessageFingerprint && (now - lastMessageTime) < 80) {
+            return;
+          }
+          lastMessageFingerprint = fp;
+          lastMessageTime = now;
+        }
+        handleIncomingAction(data);
+      }
+
+      // 单一主注入函数，优先由 React Native 直接调用
+      window.receiveMessageFromNative = function(msg) {
+        try {
+          var data = typeof msg === 'string' ? JSON.parse(msg) : msg;
+          dispatchActionSafely(data);
+        } catch(e) {}
+      };
+
+      // 单一 fallback 事件监听器
       window.addEventListener('message', function(event) {
         try {
           var data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
-          if (!data || !data.action) return;
-
-          if (data.action === 'initPdfStream') {
-            totalExpectedBytes = data.totalBytes;
-            assembledChunks = new Uint8Array(data.totalBytes);
-            bytesReceived = 0;
-            document.getElementById('loading-text').innerText = '正在载入内容 (0%)...';
-          } else if (data.action === 'appendPdfChunk') {
-            var binary = atob(data.chunkData);
-            var len = binary.length;
-            for (var i = 0; i < len; i++) {
-              assembledChunks[bytesReceived + i] = binary.charCodeAt(i);
-            }
-            bytesReceived += len;
-            var pct = Math.min(100, Math.round((bytesReceived / totalExpectedBytes) * 100));
-            document.getElementById('loading-text').innerText = '正在载入内容 (' + pct + '%)...';
-
-            if (data.isLastChunk) {
-              document.getElementById('loading-text').innerText = '正在解析文档与漫画...';
-              window.PdfReaderApi.loadFromUint8Array(assembledChunks, data.initialPage, data.theme);
-            }
-          } else if (data.action === 'nextPage') {
-            window.PdfReaderApi.nextPage();
-          } else if (data.action === 'prevPage') {
-            window.PdfReaderApi.prevPage();
-          } else if (data.action === 'goToPage') {
-            window.PdfReaderApi.goToPage(data.pageNum);
-          } else if (data.action === 'goToProgress') {
-            window.PdfReaderApi.goToProgress(data.progress);
-          } else if (data.action === 'applySettings') {
-            window.PdfReaderApi.applySettings(data.settings);
-          } else if (data.action === 'setDetectedBubbles') {
-            currentBubbles = data.bubbles || [];
-            isBubbleDetectionActive = Boolean(data.active !== undefined ? data.active : true);
-            renderBubbleOverlay(currentBubbles, isBubbleDetectionActive);
-          } else if (data.action === 'toggleBubbleDetection') {
-            isBubbleDetectionActive = Boolean(data.active);
-            if (isBubbleDetectionActive) {
-              if (currentBubbles && currentBubbles.length > 0) {
-                renderBubbleOverlay(currentBubbles, true);
-              } else {
-                requestDetection();
-              }
-            } else {
-              renderBubbleOverlay([], false);
-            }
-          } else if (data.action === 'runBubbleDetection') {
-            isBubbleDetectionActive = true;
-            requestDetection();
-          }
+          dispatchActionSafely(data);
         } catch (e) {}
       });
 

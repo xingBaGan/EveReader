@@ -2,6 +2,64 @@ import { TextBubble } from '../types/manga';
 import { isScreenTranslatorSupported, recognizeImageNative } from './screenTranslatorBridge';
 
 /**
+ * 专为 0~100% 归一化百分比坐标打造的日漫与条漫阅读顺序排序
+ * - 日漫/竖排模式：从右向左 (X 降序)、从上向下 (Y 升序)，同列容差 8.0%
+ * - 条漫/横排模式：从上向下 (Y 升序)、从左向右 (X 升序)，同行容差 6.0%
+ */
+export function sortNormalizedReadingOrder(
+  bubbles: TextBubble[],
+  preferredMode: 'auto' | 'vertical' | 'horizontal' = 'auto'
+): TextBubble[] {
+  if (bubbles.length <= 1) {
+    return bubbles.map((b, i) => ({ ...b, readingOrderIndex: i + 1 }));
+  }
+
+  let isVerticalMode = true;
+  if (preferredMode === 'horizontal') {
+    isVerticalMode = false;
+  } else if (preferredMode === 'vertical') {
+    isVerticalMode = true;
+  } else {
+    const verticalCount = bubbles.filter((b) => b.direction === 'vertical').length;
+    isVerticalMode = verticalCount >= bubbles.length / 2;
+  }
+
+  if (isVerticalMode) {
+    // 日漫从右往左 (X 降序)，同列（X 中心差 < 8.0%）从上到下 (Y 升序)
+    return [...bubbles]
+      .sort((a, b) => {
+        const aCenterX = a.box.x + a.box.width / 2;
+        const bCenterX = b.box.x + b.box.width / 2;
+        const xDiff = bCenterX - aCenterX;
+        if (Math.abs(xDiff) < 8.0) {
+          return a.box.y - b.box.y;
+        }
+        return xDiff;
+      })
+      .map((bubble, index) => ({
+        ...bubble,
+        readingOrderIndex: index + 1,
+      }));
+  }
+
+  // 横排条漫从上往下 (Y 升序)，同行（Y 中心差 < 6.0%）从左到右 (X 升序)
+  return [...bubbles]
+    .sort((a, b) => {
+      const aCenterY = a.box.y + a.box.height / 2;
+      const bCenterY = b.box.y + b.box.height / 2;
+      const yDiff = aCenterY - bCenterY;
+      if (Math.abs(yDiff) < 6.0) {
+        return a.box.x - b.box.x;
+      }
+      return yDiff;
+    })
+    .map((bubble, index) => ({
+      ...bubble,
+      readingOrderIndex: index + 1,
+    }));
+}
+
+/**
  * 执行气泡检测流程
  * @param pageNum 当前页码
  * @param base64DataUrl 当前页面的快照图片 Base64 DataURL
@@ -14,10 +72,16 @@ export async function detectBubblesForPage(
   originalWidth: number = 600,
   originalHeight: number = 800
 ): Promise<TextBubble[]> {
+  const dataLen = base64DataUrl ? base64DataUrl.length : 0;
+  console.log(`[BubbleOCR] [NATIVE_CALL_START] page=${pageNum}, hasDataUrl=${!!base64DataUrl}, bytes=${dataLen}, size=${originalWidth}x${originalHeight}`);
+
   // 1. 尝试调用原生端侧深度学习检测器 (ComicTextDetector RT-DETR + MangaOcrProcessor)
   if (isScreenTranslatorSupported() && base64DataUrl) {
     try {
       const res = await recognizeImageNative(base64DataUrl, 'ja');
+      const rawCount = res?.bubbles?.length ?? 0;
+      console.log(`[BubbleOCR] [NATIVE_CALL_COMPLETE] native module returned ${rawCount} raw bubbles`);
+
       if (res && res.bubbles && res.bubbles.length > 0) {
         const imgW = res.width || originalWidth || 1;
         const imgH = res.height || originalHeight || 1;
@@ -27,6 +91,21 @@ export async function detectBubblesForPage(
           const rawY = b.y ?? b.bounds?.top ?? (b.box?.y ?? 0);
           const rawW = b.width ?? (b.bounds ? b.bounds.right - b.bounds.left : (b.box?.width ?? 100));
           const rawH = b.height ?? (b.bounds ? b.bounds.bottom - b.bounds.top : (b.box?.height ?? 80));
+
+          const rawChars = Array.isArray(b.chars)
+            ? b.chars.map((c: any) => ({
+                char: String(c.char || ''),
+                score: typeof c.score === 'number' ? c.score : 0.95,
+                box: Array.isArray(c.box) && c.box.length === 4
+                  ? [
+                      Number(c.box[0]),
+                      Number(c.box[1]),
+                      Number(c.box[2]),
+                      Number(c.box[3])
+                    ] as [number, number, number, number]
+                  : [0, 0, 0, 0] as [number, number, number, number]
+              }))
+            : undefined;
 
           return {
             id: `bubble_p${pageNum}_${index}_${Date.now()}`,
@@ -48,17 +127,20 @@ export async function detectBubblesForPage(
             fontSize: b.fontSize,
             detectedLang: b.detectedLang || 'ja',
             langName: b.langName || '日语',
+            chars: rawChars,
           };
         });
 
-        return nativeBubbles;
+        const sorted = sortNormalizedReadingOrder(nativeBubbles, 'auto');
+        console.log(`[BubbleOCR] [FINAL_RESULTS] detectBubblesForPage sorted ${sorted.length} bubbles`);
+        return sorted;
       }
     } catch (err) {
-      console.warn('[MangaDetector] 原生识别调用异常:', err);
+      console.error('[BubbleOCR] [ERROR_OR_CANCEL] recognizeImageNative error:', err);
     }
+  } else if (!isScreenTranslatorSupported()) {
+    console.warn('[BubbleOCR] [ERROR_OR_CANCEL] isScreenTranslatorSupported is false, native module not available');
   }
 
-  // 2. 在非原生编译环境（如 Expo Go / Web）中，主检测流程由 WebView 内置的 Canvas 计算机视觉内核
-  // 直接以 0 拷贝、10ms 极速在真实渲染像素上动态完成，严禁返回伪造写死气泡！
   return [];
 }

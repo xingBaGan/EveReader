@@ -21,7 +21,17 @@ export const ReaderWebView = forwardRef<ReaderWebViewRef, ReaderWebViewProps>(
     useImperativeHandle(ref, () => ({
       postMessage: (action: string, payload?: Record<string, any>) => {
         const payloadStr = JSON.stringify({ action, ...payload });
-        const js = `window.postMessage(${JSON.stringify(payloadStr)}, '*'); true;`;
+        const js = `
+          (function() {
+            var msgStr = ${JSON.stringify(payloadStr)};
+            if (typeof window.receiveMessageFromNative === 'function') {
+              try { window.receiveMessageFromNative(msgStr); } catch(e) {}
+            } else {
+              try { window.postMessage(msgStr, '*'); } catch(e) {}
+            }
+          })();
+          true;
+        `;
         webViewRef.current?.injectJavaScript(js);
       },
     }));

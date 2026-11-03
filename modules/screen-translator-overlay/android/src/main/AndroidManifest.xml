@@ -18,6 +18,16 @@
       tools:ignore="ProtectedPermissions" />
 
   <application>
+    <!-- 调试用检测评测入口（receiver 内部有 debuggable 兜底，release 构建直接忽略） -->
+    <receiver
+      android:name=".DebugOcrEvalReceiver"
+      android:enabled="true"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="expo.modules.screentranslator.DEBUG_OCR_EVAL" />
+      </intent-filter>
+    </receiver>
+
     <!-- 悬浮窗与屏幕捕获核心前台服务 -->
     <service
       android:name=".ScreenCaptureOverlayService"
