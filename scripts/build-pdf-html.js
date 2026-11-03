@@ -511,6 +511,52 @@ ${pdfJsCode}
                 });
               });
 
+              // Extract Outline/Bookmarks if available
+              try {
+                doc.getOutline().then(function(outline) {
+                  if (outline && outline.length > 0) {
+                    function resolveOutlineItem(item) {
+                      return new Promise(function(resolve) {
+                        var title = (item.title || '章节').trim();
+                        if (!item.dest) {
+                          resolve({ id: 'outline_' + Math.random(), label: title, href: '1' });
+                          return;
+                        }
+                        var pDest = typeof item.dest === 'string'
+                          ? doc.getDestination(item.dest)
+                          : Promise.resolve(item.dest);
+                        pDest.then(function(explicitDest) {
+                          if (!explicitDest || !explicitDest[0]) {
+                            resolve({ id: 'outline_' + Math.random(), label: title, href: '1' });
+                            return;
+                          }
+                          doc.getPageIndex(explicitDest[0]).then(function(idx) {
+                            var pNum = idx + 1;
+                            resolve({
+                              id: 'outline_p' + pNum + '_' + Math.random(),
+                              label: title,
+                              href: String(pNum)
+                            });
+                          }).catch(function() {
+                            resolve({ id: 'outline_' + Math.random(), label: title, href: '1' });
+                          });
+                        }).catch(function() {
+                          resolve({ id: 'outline_' + Math.random(), label: title, href: '1' });
+                        });
+                      });
+                    }
+                    Promise.all(outline.map(resolveOutlineItem)).then(function(tocList) {
+                      if (tocList && tocList.length > 0) {
+                        sendToParent({
+                          type: 'tocLoaded',
+                          toc: tocList
+                        });
+                      }
+                    });
+                  }
+                }).catch(function() {});
+              } catch(e) {}
+
               renderCurrentPage();
             }).catch(function(err) {
               sendToParent({ type: 'error', message: 'PDF 解析失败: ' + (err.message || String(err)) });
