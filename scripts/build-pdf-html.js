@@ -207,14 +207,62 @@ ${pdfJsCode}
         }
       }
 
+      var isSnapshotInFlight = false;
+      var activeDetectionReqId = 0;
+      var currentRenderTask = null;
+      var pendingPageNum = null;
+
+      function abortInFlightDetection() {
+        activeDetectionReqId++;
+        isSnapshotInFlight = false;
+        currentBubbles = [];
+        renderBubbleOverlay([], false);
+        sendToParent({
+          type: 'cancelBubbleDetection',
+          pageNum: currentPageNum,
+          activeReqId: activeDetectionReqId
+        });
+      }
+
+      function goToPageInternal(targetPage) {
+        if (!pdfDoc) return;
+        var clamped = Math.max(1, Math.min(totalPages, targetPage));
+        if (clamped === currentPageNum && !isRendering && document.querySelector('canvas')) {
+          return;
+        }
+
+        // 无论当前是否正在渲染，连续点击翻页时坚决中止旧页面的气泡识别、清空图层并通知 Native
+        abortInFlightDetection();
+
+        if (isRendering) {
+          pendingPageNum = clamped;
+          if (currentRenderTask) {
+            try { currentRenderTask.cancel(); } catch (e) {}
+          }
+          return;
+        }
+
+        currentPageNum = clamped;
+        renderCurrentPage();
+      }
+
       function renderCurrentPage() {
-        if (!pdfDoc || isRendering) return;
+        if (!pdfDoc) return;
         isRendering = true;
+        var renderPageNum = currentPageNum;
 
         var container = document.getElementById('viewer-container');
         container.innerHTML = '';
 
-        pdfDoc.getPage(currentPageNum).then(function(page) {
+        pdfDoc.getPage(renderPageNum).then(function(page) {
+          if (pendingPageNum !== null && pendingPageNum !== renderPageNum) {
+            isRendering = false;
+            var next = pendingPageNum;
+            pendingPageNum = null;
+            goToPageInternal(next);
+            return;
+          }
+
           var containerWidth = window.innerWidth || document.documentElement.clientWidth || 360;
           var unscaledViewport = page.getViewport({ scale: 1.0 });
 
@@ -249,8 +297,17 @@ ${pdfJsCode}
             viewport: viewport
           };
 
-          page.render(renderContext).promise.then(function() {
+          currentRenderTask = page.render(renderContext);
+          currentRenderTask.promise.then(function() {
+            currentRenderTask = null;
             isRendering = false;
+
+            if (pendingPageNum !== null) {
+              var next = pendingPageNum;
+              pendingPageNum = null;
+              goToPageInternal(next);
+              return;
+            }
 
             var progress = (currentPageNum / totalPages) * 100;
             sendToParent({
@@ -272,7 +329,17 @@ ${pdfJsCode}
               requestDetection(canvas);
             }
           }).catch(function(err) {
+            currentRenderTask = null;
             isRendering = false;
+            if (err && (err.name === 'RenderingCancelledException' || String(err).indexOf('RenderingCancelledException') !== -1)) {
+              if (pendingPageNum !== null) {
+                var next = pendingPageNum;
+                pendingPageNum = null;
+                goToPageInternal(next);
+              }
+              return;
+            }
+            console.warn('page.render failed:', err);
           });
         }).catch(function(err) {
           isRendering = false;
@@ -280,32 +347,30 @@ ${pdfJsCode}
         });
       }
 
-      var isSnapshotInFlight = false;
-      var activeDetectionReqId = 0;
-
       function requestDetection(canvasEl, incomingReqId) {
         var cv = canvasEl || document.querySelector('canvas');
         if (!cv) {
           console.warn('[BubbleOCR] [SNAPSHOT_FAILED] Canvas not found on page ' + currentPageNum);
           return;
         }
-        if (isSnapshotInFlight) {
-          console.warn('[BubbleOCR] [SNAPSHOT_SKIPPED] snapshot already in flight');
-          return;
-        }
-        isSnapshotInFlight = true;
         var reqId = incomingReqId || (++activeDetectionReqId);
         activeDetectionReqId = reqId;
+        isSnapshotInFlight = true;
+        var capturePageNum = currentPageNum;
 
         var t0 = Date.now();
-        console.log('[BubbleOCR] [SNAPSHOT_START] reqId=' + reqId + ', page=' + currentPageNum + ', size=' + cv.width + 'x' + cv.height);
+        console.log('[BubbleOCR] [SNAPSHOT_START] reqId=' + reqId + ', page=' + capturePageNum + ', size=' + cv.width + 'x' + cv.height);
         try {
           var snapshot = cv.toDataURL('image/jpeg', 0.90);
+          if (currentPageNum !== capturePageNum || activeDetectionReqId !== reqId) {
+            console.warn('[BubbleOCR] [SNAPSHOT_DROPPED] Page switched during snapshot, reqId=' + reqId);
+            return;
+          }
           console.log('[BubbleOCR] [SNAPSHOT_COMPLETE] reqId=' + reqId + ', bytes=' + snapshot.length + ' in ' + (Date.now() - t0) + 'ms');
           sendToParent({
             type: 'requestBubbleDetection',
             requestId: reqId,
-            pageNum: currentPageNum,
+            pageNum: capturePageNum,
             snapshot: snapshot,
             width: cv.width,
             height: cv.height
@@ -316,7 +381,7 @@ ${pdfJsCode}
           sendToParent({
             type: 'requestBubbleDetection',
             requestId: reqId,
-            pageNum: currentPageNum,
+            pageNum: capturePageNum,
             width: cv.width,
             height: cv.height
           });
@@ -397,15 +462,9 @@ ${pdfJsCode}
         var width = window.innerWidth || document.documentElement.clientWidth;
         var x = e.clientX;
         if (x < width * 0.28) {
-          if (currentPageNum > 1) {
-            currentPageNum--;
-            renderCurrentPage();
-          }
+          goToPageInternal(currentPageNum - 1);
         } else if (x > width * 0.72) {
-          if (currentPageNum < totalPages) {
-            currentPageNum++;
-            renderCurrentPage();
-          }
+          goToPageInternal(currentPageNum + 1);
         } else {
           sendToParent({ type: 'toggleBars' });
         }
@@ -462,31 +521,21 @@ ${pdfJsCode}
         },
 
         nextPage: function() {
-          if (currentPageNum < totalPages) {
-            currentPageNum++;
-            renderCurrentPage();
-          }
+          goToPageInternal(currentPageNum + 1);
         },
 
         prevPage: function() {
-          if (currentPageNum > 1) {
-            currentPageNum--;
-            renderCurrentPage();
-          }
+          goToPageInternal(currentPageNum - 1);
         },
 
         goToPage: function(num) {
-          if (num >= 1 && num <= totalPages) {
-            currentPageNum = num;
-            renderCurrentPage();
-          }
+          goToPageInternal(num);
         },
 
         goToProgress: function(pct) {
           if (totalPages > 0) {
             var target = Math.max(1, Math.min(totalPages, Math.round((pct / 100) * totalPages)));
-            currentPageNum = target;
-            renderCurrentPage();
+            goToPageInternal(target);
           }
         },
 
@@ -530,10 +579,14 @@ ${pdfJsCode}
         } else if (data.action === 'applySettings') {
           window.PdfReaderApi.applySettings(data.settings);
         } else if (data.action === 'setDetectedBubbles' || data.action === 'detectionCompleted') {
-          // 时序与版本保护：只有匹配当前 activeDetectionReqId 的 ACK 才能释放锁并更新 overlay
-          // 旧 request 的迟到 ACK 严禁解锁新请求！
+          // 时序与版本保护：只有匹配当前 activeDetectionReqId 且匹配当前页码的 ACK 才能释放锁并更新 overlay
+          // 旧 request 或旧页面的迟到 ACK 严禁污染当前页面！
           if (data.requestId && activeDetectionReqId && data.requestId !== activeDetectionReqId) {
             console.warn('[BubbleOCR] [STALE_ACK_DROPPED] reqId=' + data.requestId + ' does not match activeReqId=' + activeDetectionReqId);
+            return;
+          }
+          if (data.pageNum && data.pageNum !== currentPageNum) {
+            console.warn('[BubbleOCR] [STALE_PAGE_DROPPED] pageNum=' + data.pageNum + ' does not match currentPageNum=' + currentPageNum);
             return;
           }
           isSnapshotInFlight = false;
@@ -555,12 +608,11 @@ ${pdfJsCode}
             requestDetection(null, data.requestId);
           } else {
             // 关闭检测终态：释放锁并清空 overlay
-            isSnapshotInFlight = false;
-            currentBubbles = [];
-            renderBubbleOverlay([], false);
+            abortInFlightDetection();
           }
         } else if (data.action === 'runBubbleDetection') {
           isBubbleDetectionActive = true;
+          isSnapshotInFlight = false;
           requestDetection(null, data.requestId);
         }
       }

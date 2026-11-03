@@ -199,7 +199,9 @@ export function ReaderModal() {
         }
         break;
 
-      case 'relocated':
+      case 'relocated': {
+        const prevPage = useReaderStore.getState().currentPage;
+        const newPage = typeof data.currentPage === 'number' ? data.currentPage : parseInt(data.currentPage, 10);
         if (isPdf) {
           onRelocated(
             String(data.currentPage),
@@ -217,7 +219,27 @@ export function ReaderModal() {
             data.totalPages
           );
         }
+
+        // 翻页到达新页面时，立即将旧页面的气泡识别状态与图层全部中止并清空
+        if (!isNaN(newPage) && newPage !== prevPage) {
+          activeRequestIdRef.current = ++nextReqIdRef.current;
+          inFlightRequestRef.current = false;
+          setIsDetectingBubbles(false);
+          setDetectedBubbles([]);
+          setSelectedBubble(null);
+        }
         break;
+      }
+
+      case 'cancelBubbleDetection': {
+        // WebView 触发翻页动作时发出的即时中止信号
+        activeRequestIdRef.current = ++nextReqIdRef.current;
+        inFlightRequestRef.current = false;
+        setIsDetectingBubbles(false);
+        setDetectedBubbles([]);
+        setSelectedBubble(null);
+        break;
+      }
 
       case 'searchResults':
         setSearchResults(data.results || []);
@@ -232,30 +254,43 @@ export function ReaderModal() {
 
       case 'requestBubbleDetection': {
         const reqId = data.requestId || ++nextReqIdRef.current;
-        const targetPage = data.pageNum || currentPage || 1;
+        const currentStorePage = useReaderStore.getState().currentPage;
+        const targetPage = data.pageNum || currentStorePage || 1;
         const snapshotLen = data.snapshot ? data.snapshot.length : 0;
 
-        // In-flight 幂等防护：若当前请求正在进行，重复请求坚决丢弃，绝不发起重复 OCR
-        if (inFlightRequestRef.current && reqId <= activeRequestIdRef.current) {
-          console.warn(`[BubbleOCR] [ERROR_OR_CANCEL] Duplicate in-flight request dropped: reqId=${reqId}, active=${activeRequestIdRef.current}`);
+        // 若请求对应的页码已被翻过（目标页不等于当前激活页），坚决不启动耗时的底层 OCR
+        if (targetPage !== currentStorePage) {
+          console.warn(`[BubbleOCR] [ERROR_OR_CANCEL] Request page ${targetPage} does not match current store page ${currentStorePage}, dropped`);
+          webViewRef.current?.postMessage('detectionFailed', {
+            reason: 'page_mismatch',
+            requestId: reqId,
+            pageNum: targetPage,
+          });
           break;
         }
 
+        // 将当前请求标记为活跃请求，覆盖任何先前的旧请求
         activeRequestIdRef.current = reqId;
         inFlightRequestRef.current = true;
         setIsDetectingBubbles(true);
+        // 新一页开始检测时，清空之前页面的残留气泡
+        setDetectedBubbles([]);
+        setSelectedBubble(null);
 
         console.log(`[BubbleOCR] [JS_RECEIPT] reqId=${reqId}, page=${targetPage}, snapshotBytes=${snapshotLen}, width=${data.width}, height=${data.height}`);
 
         let ackSent = false;
         detectBubblesForPage(targetPage, data.snapshot, data.width, data.height)
           .then((bubbles) => {
-            // 时序版本防护：若用户已翻页或发起了新请求，旧请求的识别结果坚决不覆盖当前页面
-            if (activeRequestIdRef.current !== reqId || (currentPage && targetPage !== currentPage)) {
-              console.warn(`[BubbleOCR] [ERROR_OR_CANCEL] Stale request result ignored: reqId=${reqId}, currentActive=${activeRequestIdRef.current}, reqPage=${targetPage}, currentPage=${currentPage}`);
+            const latestPage = useReaderStore.getState().currentPage;
+            // 时序与页码版本严格防护：
+            // 若用户在 OCR 运行期间翻页或触发了新请求，旧请求的结果坚决不覆盖当前页面
+            if (activeRequestIdRef.current !== reqId || latestPage !== targetPage) {
+              console.warn(`[BubbleOCR] [ERROR_OR_CANCEL] Stale request result ignored: reqId=${reqId}, currentActive=${activeRequestIdRef.current}, reqPage=${targetPage}, latestPage=${latestPage}`);
               webViewRef.current?.postMessage('detectionFailed', {
                 reason: 'stale',
                 requestId: reqId,
+                pageNum: targetPage,
               });
               ackSent = true;
               return;
@@ -268,6 +303,7 @@ export function ReaderModal() {
                 bubbles,
                 active: true,
                 requestId: reqId,
+                pageNum: targetPage,
               });
               ackSent = true;
             } else {
@@ -277,6 +313,7 @@ export function ReaderModal() {
                 bubbles: [],
                 active: true,
                 requestId: reqId,
+                pageNum: targetPage,
               });
               ackSent = true;
             }
@@ -286,6 +323,7 @@ export function ReaderModal() {
             webViewRef.current?.postMessage('detectionFailed', {
               reason: err?.message || 'detection_error',
               requestId: reqId,
+              pageNum: targetPage,
             });
             ackSent = true;
           })
@@ -295,6 +333,7 @@ export function ReaderModal() {
               webViewRef.current?.postMessage('detectionFailed', {
                 reason: 'finally_fallback',
                 requestId: reqId,
+                pageNum: targetPage,
               });
             }
             if (activeRequestIdRef.current === reqId) {
@@ -341,6 +380,13 @@ export function ReaderModal() {
   const handleToggleBubbleDetect = () => {
     const nextActive = !isBubbleDetectActive;
     console.log(`[BubbleOCR] [JS_CLICK_ENTRY] handleToggleBubbleDetect clicked, nextActive=${nextActive}, isPdf=${isPdf}`);
+    if (!nextActive) {
+      activeRequestIdRef.current = ++nextReqIdRef.current;
+      inFlightRequestRef.current = false;
+      setIsDetectingBubbles(false);
+      setDetectedBubbles([]);
+      setSelectedBubble(null);
+    }
     toggleBubbleDetection(nextActive);
   };
 
@@ -348,7 +394,11 @@ export function ReaderModal() {
     console.log(`[BubbleOCR] [JS_CLICK_ENTRY] handleRefreshBubbleDetect clicked, isPdf=${isPdf}`);
     if (isPdf && webViewRef.current) {
       const reqId = ++nextReqIdRef.current;
+      activeRequestIdRef.current = reqId;
+      inFlightRequestRef.current = false;
       setIsDetectingBubbles(true);
+      setDetectedBubbles([]);
+      setSelectedBubble(null);
       webViewRef.current.postMessage('runBubbleDetection', {
         requestId: reqId,
       });
