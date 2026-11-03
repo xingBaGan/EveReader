@@ -938,9 +938,6 @@ object MangaOcrProcessor {
     try {
       cropBmp = Bitmap.createBitmap(sourceBitmap, cropLeft, cropTop, cropW, cropH)
 
-      val isWideHorizontal = regionRect.width() >= regionRect.height() * 1.8f ||
-          (regionRect.width() >= 160 && regionRect.width() > regionRect.height())
-
       // 0. 优先调用漫画端侧专用 CharSpot 模型 (CharSpot-Small: 单次前向+原生阅读顺序+字符级坐标)
       if (MangaOcrModel.isModelReady) {
         val ocrRes = MangaOcrModel.recognizeDetail(cropBmp)
@@ -1103,20 +1100,9 @@ object MangaOcrProcessor {
 
       val consolidatedText = consolidateGroupCandidates(sortedLines, isVertical)
 
-      // 若有 Manga-OCR 候选，通过多通道共识裁决器综合仲裁，防止孤立幻觉覆盖有效基础文本
-      val finalText = if (mangaOcrTextCand != null && consolidatedText.isNotBlank()) {
-        val cands = listOf(
-          CandidateInfo(consolidatedText, source = "mlkit_multiscale", confidence = 0.88f),
-          CandidateInfo(mangaOcrTextCand, source = "manga_ocr", confidence = 0.92f)
-        )
-        arbitrateMultiChannelCandidates(consolidatedText, cands, isWideHorizontal)
-      } else if (consolidatedText.isNotBlank()) {
-        consolidatedText
-      } else if (mangaOcrTextCand != null) {
-        mangaOcrTextCand
-      } else {
-        return null
-      }
+      // 多通道扫描已产出统一文本；若为空则说明该区域无有效文字
+      if (consolidatedText.isBlank()) return null
+      val finalText = consolidatedText
 
       if (finalText.isBlank() || isJunkNoiseLine(finalText, regionRect)) return null
       val disambiguatedText = disambiguateMangaCharacters(finalText)

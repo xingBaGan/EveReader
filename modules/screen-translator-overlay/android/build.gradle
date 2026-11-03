@@ -30,7 +30,8 @@ dependencies {
   implementation "com.google.mlkit:translate:17.0.3"
 
   // ONNX Runtime for on-device Comic Text & Speech Bubble Detection
-  implementation "com.microsoft.onnxruntime:onnxruntime-android:1.19.2"
+  // 1.19.2 在 Android 16 上创建 CharSpot 会话时会 SIGSEGV，与 POC 验证版本对齐
+  implementation "com.microsoft.onnxruntime:onnxruntime-android:1.23.2"
 }
 
 
