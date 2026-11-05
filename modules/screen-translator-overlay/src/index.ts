@@ -937,14 +937,23 @@ export function isOnnxDownloadSupported(): boolean {
  */
 export async function onnxDownloadModel(
   url: string,
-  targetFileName: string
+  targetFileName: string,
+  expectedSha256?: string,
+  activeModelFileName?: string
 ): Promise<boolean> {
   if (!NativeModule || typeof NativeModule.onnxDownloadModel !== 'function') {
     throw new Error(
       '当前手机安装的 APK 是旧版原生底包，未包含最新加入的 Kotlin 下载与 ONNX 翻译模块。\n\n💡 原因：Metro 仅能热重载前端 JS 界面，底层 Kotlin 原生代码需要重新编译打包 APK。\n\n👉 解决方案：请重新编译打包并安装最新 APK（运行 npx expo run:android 或 eas build）。'
     );
   }
-  return Boolean(await NativeModule.onnxDownloadModel(url, targetFileName));
+  return Boolean(
+    await NativeModule.onnxDownloadModel(
+      url,
+      targetFileName,
+      expectedSha256 || null,
+      activeModelFileName || null
+    )
+  );
 }
 
 /**

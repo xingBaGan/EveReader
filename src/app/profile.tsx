@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -21,7 +21,18 @@ import {
   ShieldCheck,
   DownloadCloud,
   CheckCircle2,
+  Cpu,
+  HardDrive,
+  Trash2,
 } from 'lucide-react-native';
+import {
+  DEVICE_MODEL_CATALOG,
+  DeviceModelManager,
+  type DeviceModelStatus,
+  type DeviceTranslationModel,
+} from '../translation';
+
+const deviceModelManager = new DeviceModelManager();
 
 export default function ProfileScreen() {
   const user = useAuthStore((s) => s.user);
@@ -44,12 +55,33 @@ export default function ProfileScreen() {
 
   // Proxy input
   const [proxyInput, setProxyInput] = useState(customProxyUrl);
+  const [modelStatuses, setModelStatuses] = useState<
+    Partial<Record<DeviceTranslationModel, DeviceModelStatus>>
+  >({});
+  const [busyModel, setBusyModel] = useState<DeviceTranslationModel | null>(null);
+
+  const refreshModelStatuses = useCallback(async () => {
+    const entries = await Promise.all(
+      DEVICE_MODEL_CATALOG.map(async (pack) => [pack.id, await deviceModelManager.getStatus(pack.id)] as const)
+    );
+    setModelStatuses(Object.fromEntries(entries));
+  }, []);
 
   React.useEffect(() => {
     if (customProxyUrl) {
       setProxyInput(customProxyUrl);
     }
   }, [customProxyUrl]);
+
+  useEffect(() => {
+    refreshModelStatuses();
+  }, [refreshModelStatuses]);
+
+  useEffect(() => {
+    if (!busyModel) return;
+    const timer = setInterval(refreshModelStatuses, 500);
+    return () => clearInterval(timer);
+  }, [busyModel, refreshModelStatuses]);
 
   const handleLogin = async () => {
     if (!email.trim() || !password.trim()) {
@@ -79,10 +111,146 @@ export default function ProfileScreen() {
     Alert.alert('设置成功', proxyInput ? '已启用自定义代理镜像' : '已重置为默认官方镜像');
   };
 
+  const handleInstallModel = async (id: DeviceTranslationModel) => {
+    try {
+      setBusyModel(id);
+      await deviceModelManager.install(id);
+      await refreshModelStatuses();
+    } catch (error: any) {
+      Alert.alert('模型安装失败', error?.message || '无法安装端侧翻译模型');
+    } finally {
+      setBusyModel(null);
+    }
+  };
+
+  const handleActivateModel = async (id: DeviceTranslationModel) => {
+    try {
+      setBusyModel(id);
+      await deviceModelManager.activate(id);
+      await refreshModelStatuses();
+    } catch (error: any) {
+      Alert.alert('模型切换失败', error?.message || '无法激活端侧翻译模型');
+    } finally {
+      setBusyModel(null);
+    }
+  };
+
+  const handleRemoveModel = (id: DeviceTranslationModel) => {
+    const pack = DEVICE_MODEL_CATALOG.find((item) => item.id === id);
+    Alert.alert('删除模型包', `确认删除「${pack?.displayName || id}」并释放存储空间？`, [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '删除',
+        style: 'destructive',
+        onPress: async () => {
+          setBusyModel(id);
+          try {
+            await deviceModelManager.remove(id);
+            await refreshModelStatuses();
+          } finally {
+            setBusyModel(null);
+          }
+        },
+      },
+    ]);
+  };
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <Text style={styles.screenTitle}>个人中心与设置</Text>
+
+        <View style={styles.card}>
+          <View style={styles.modelHeader}>
+            <View style={styles.modelHeaderTitle}>
+              <Cpu size={18} color="#a78bfa" />
+              <Text style={styles.cardTitle}>端侧漫画翻译模型</Text>
+            </View>
+            <Text style={styles.modelHeaderHint}>按需下载</Text>
+          </View>
+          <Text style={styles.cardSubtitle}>
+            基础包与高清增强包均存放在应用私有目录，不计入默认 APK；下载前会进行 SHA-256 完整性校验。
+          </Text>
+
+          <View style={styles.modelList}>
+            {DEVICE_MODEL_CATALOG.filter((pack) => !pack.experimental).map((pack) => {
+              const status = modelStatuses[pack.id];
+              const isBusy = busyModel === pack.id;
+              const progress = status?.progress?.progress ?? 0;
+              const isInstalled = status?.state === 'installed' || status?.state === 'active';
+              const unavailable = status?.state === 'unavailable';
+              const missingConfig = !pack.downloadUrl || !pack.sha256;
+              return (
+                <View key={pack.id} style={styles.modelItem}>
+                  <View style={styles.modelTitleRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.modelName}>{pack.displayName}</Text>
+                      <Text style={styles.modelDescription}>{pack.description}</Text>
+                    </View>
+                    {status?.state === 'active' ? (
+                      <View style={styles.activeModelBadge}>
+                        <Text style={styles.activeModelBadgeText}>使用中</Text>
+                      </View>
+                    ) : null}
+                  </View>
+
+                  <View style={styles.modelMetaRow}>
+                    <HardDrive size={13} color="#64748b" />
+                    <Text style={styles.modelMetaText}>
+                      约 {Math.round(pack.expectedBytes / 1024 / 1024)} MB
+                    </Text>
+                    <Text style={styles.modelMetaDot}>·</Text>
+                    <Text style={styles.modelMetaText}>
+                      {missingConfig
+                        ? '等待配置下载地址'
+                        : unavailable
+                          ? '当前平台不可用'
+                          : status?.state === 'installing'
+                            ? `下载中 ${Math.max(0, Math.round(progress * 100))}%`
+                            : isInstalled
+                              ? '已安装'
+                              : '未安装'}
+                    </Text>
+                  </View>
+
+                  {status?.state === 'installing' ? (
+                    <View style={styles.progressTrack}>
+                      <View style={[styles.progressFill, { width: `${Math.max(0, progress * 100)}%` }]} />
+                    </View>
+                  ) : null}
+
+                  <View style={styles.modelActions}>
+                    {!isInstalled ? (
+                      <Pressable
+                        style={[styles.modelPrimaryButton, (isBusy || unavailable || missingConfig) && styles.modelButtonDisabled]}
+                        disabled={isBusy || unavailable || missingConfig}
+                        onPress={() => handleInstallModel(pack.id)}>
+                        {isBusy ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.modelPrimaryButtonText}>下载模型</Text>}
+                      </Pressable>
+                    ) : status?.state !== 'active' ? (
+                      <Pressable
+                        style={[styles.modelPrimaryButton, isBusy && styles.modelButtonDisabled]}
+                        disabled={isBusy}
+                        onPress={() => handleActivateModel(pack.id)}>
+                        {isBusy ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.modelPrimaryButtonText}>切换使用</Text>}
+                      </Pressable>
+                    ) : (
+                      <View style={styles.modelActiveButton}>
+                        <CheckCircle2 size={14} color="#34d399" />
+                        <Text style={styles.modelActiveButtonText}>当前模型</Text>
+                      </View>
+                    )}
+                    {isInstalled ? (
+                      <Pressable style={styles.modelDeleteButton} onPress={() => handleRemoveModel(pack.id)}>
+                        <Trash2 size={15} color="#f87171" />
+                      </Pressable>
+                    ) : null}
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        </View>
 
         {/* User Card */}
         {user ? (
@@ -276,6 +444,130 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  modelHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  modelHeaderTitle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  modelHeaderHint: {
+    color: '#a78bfa',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  modelList: {
+    marginTop: 14,
+    gap: 10,
+  },
+  modelItem: {
+    backgroundColor: '#0f172a',
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  modelTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  modelName: {
+    color: '#f8fafc',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  modelDescription: {
+    color: '#64748b',
+    fontSize: 11,
+    lineHeight: 16,
+    marginTop: 2,
+  },
+  activeModelBadge: {
+    backgroundColor: '#064e3b',
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+  },
+  activeModelBadgeText: {
+    color: '#6ee7b7',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  modelMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    gap: 4,
+  },
+  modelMetaText: {
+    color: '#94a3b8',
+    fontSize: 10,
+  },
+  modelMetaDot: {
+    color: '#475569',
+    fontSize: 10,
+  },
+  progressTrack: {
+    height: 4,
+    backgroundColor: '#334155',
+    borderRadius: 2,
+    overflow: 'hidden',
+    marginTop: 10,
+  },
+  progressFill: {
+    height: 4,
+    backgroundColor: '#8b5cf6',
+  },
+  modelActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 10,
+  },
+  modelPrimaryButton: {
+    minWidth: 92,
+    height: 34,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: '#7c3aed',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modelButtonDisabled: {
+    opacity: 0.45,
+  },
+  modelPrimaryButtonText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  modelActiveButton: {
+    height: 34,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: '#052e2b',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  modelActiveButtonText: {
+    color: '#6ee7b7',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  modelDeleteButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#7f1d1d',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   userHeader: {
     flexDirection: 'row',

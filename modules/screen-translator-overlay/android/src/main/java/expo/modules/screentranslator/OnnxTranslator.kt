@@ -204,15 +204,6 @@ object OnnxTranslator {
         val fName = targetFile.name
         Log.i(TAG, "Loading selected ONNX translation model: ${targetFile.absolutePath}")
 
-        // 兼容性保障：保持 translation_model.onnx 与当前生效模型同步，兼容旧底包调用路径
-        val defaultModelFile = File(modelDir, "translation_model.onnx")
-        if (!fName.equals("translation_model.onnx", ignoreCase = true) && !defaultModelFile.exists()) {
-          try {
-            targetFile.copyTo(defaultModelFile, overwrite = true)
-            Log.i(TAG, "已自动同步建立 translation_model.onnx 兼容入口")
-          } catch (e: Exception) {}
-        }
-
         if (fName.contains("encoder", ignoreCase = true)) {
           encoderSession = env.createSession(targetFile.absolutePath, sessionOptions)
           val decFile = File(modelDir, fName.replace("encoder", "decoder"))
@@ -532,7 +523,9 @@ object OnnxTranslator {
   suspend fun downloadModel(
     context: Context,
     downloadUrl: String,
-    targetFileName: String
+    targetFileName: String,
+    expectedSha256: String? = null,
+    activeModelFileName: String? = null
   ): Boolean = withContext(Dispatchers.IO) {
     if (isDownloading) {
       Log.w(TAG, "已有正在执行的模型下载任务")
@@ -621,8 +614,149 @@ object OnnxTranslator {
         }
       }
 
-      // 下载完成，若为压缩包则自动解压至模型目录
-      if (targetFileName.endsWith(".zip", ignoreCase = true)) {
+      if (!expectedSha256.isNullOrBlank()) {
+        val actualSha256 = sha256(tempFile)
+        if (!actualSha256.equals(expectedSha256.trim(), ignoreCase = true)) {
+          throw java.io.IOException("模型清单 SHA-256 校验失败")
+        }
+      }
+
+      // 1. 如果下载的是逐文件清单 manifest.json，执行版本化逐文件分块下载与校验
+      if (targetFileName.equals("manifest.json", ignoreCase = true) || downloadUrl.endsWith("manifest.json", ignoreCase = true)) {
+        val manifestContent = tempFile.readText(Charsets.UTF_8)
+        val manifestJson = org.json.JSONObject(manifestContent)
+        val variantName = manifestJson.optString("variant", targetFileName.removeSuffix(".json"))
+        val versionName = manifestJson.optString("version", "default")
+        val filesArray = manifestJson.getJSONArray("files")
+        val totalExpectedBytes = manifestJson.optLong("totalBytes", 0L)
+
+        val stagingDir = File(modelDir, ".staging-$variantName-$versionName")
+        val versionDir = File(modelDir, "$variantName-$versionName")
+
+        if (stagingDir.exists()) stagingDir.deleteRecursively()
+        stagingDir.mkdirs()
+
+        // 保存 manifest.json 到 staging
+        File(stagingDir, "manifest.json").writeText(manifestContent, Charsets.UTF_8)
+
+        val baseUrl = downloadUrl.substringBeforeLast("/")
+        var completedBytes = 0L
+
+        for (i in 0 until filesArray.length()) {
+          if (cancelDownloadFlag) {
+            stagingDir.deleteRecursively()
+            tempFile.delete()
+            downloadProgressState = mapOf(
+              "status" to "cancelled",
+              "progress" to 0.0,
+              "downloadedBytes" to 0L,
+              "totalBytes" to 0L,
+              "speedKbps" to 0.0,
+              "error" to "用户已取消下载",
+              "targetFileName" to targetFileName
+            )
+            return@withContext false
+          }
+
+          val fileObj = filesArray.getJSONObject(i)
+          val relPath = fileObj.getString("path")
+          val expectedFileBytes = fileObj.getLong("bytes")
+          val expectedFileSha = fileObj.getString("sha256")
+
+          val fileDest = File(stagingDir, relPath.replace("/", File.separator))
+          fileDest.parentFile?.mkdirs()
+
+          val fileUrl = "$baseUrl/$relPath"
+          val fileConn = openConnectionWithRedirects(fileUrl)
+          if (fileConn.responseCode !in 200..299) {
+            stagingDir.deleteRecursively()
+            tempFile.delete()
+            throw java.io.IOException("下载分块文件失败 $relPath (HTTP ${fileConn.responseCode})")
+          }
+
+          fileConn.inputStream.use { inStream ->
+            FileOutputStream(fileDest).use { outStream ->
+              val chunkBuf = ByteArray(65536)
+              var r = inStream.read(chunkBuf)
+              var lastUpd = System.currentTimeMillis()
+              var bytesDelta = 0L
+
+              while (r != -1) {
+                if (cancelDownloadFlag) {
+                  stagingDir.deleteRecursively()
+                  tempFile.delete()
+                  return@withContext false
+                }
+                outStream.write(chunkBuf, 0, r)
+                completedBytes += r
+                bytesDelta += r
+
+                val now = System.currentTimeMillis()
+                val diff = now - lastUpd
+                if (diff >= 300) {
+                  val spd = if (diff > 0) (bytesDelta / 1024.0) / (diff / 1000.0) else 0.0
+                  val prog = if (totalExpectedBytes > 0) min(1.0, completedBytes.toDouble() / totalExpectedBytes) else -1.0
+                  downloadProgressState = mapOf(
+                    "status" to "downloading",
+                    "progress" to prog,
+                    "downloadedBytes" to completedBytes,
+                    "totalBytes" to totalExpectedBytes,
+                    "speedKbps" to spd,
+                    "error" to "",
+                    "targetFileName" to relPath
+                  )
+                  lastUpd = now
+                  bytesDelta = 0L
+                }
+                r = inStream.read(chunkBuf)
+              }
+            }
+          }
+          fileConn.disconnect()
+
+          // 严格校验每个下载文件的 SHA-256
+          val actualFileSha = sha256(fileDest)
+          if (!actualFileSha.equals(expectedFileSha.trim(), ignoreCase = true)) {
+            stagingDir.deleteRecursively()
+            tempFile.delete()
+            throw java.io.IOException("文件校验失败: $relPath (SHA-256 不匹配)")
+          }
+        }
+
+        // 验证完成，原子切换版本目录
+        downloadProgressState = mapOf(
+          "status" to "extracting",
+          "progress" to 1.0,
+          "downloadedBytes" to totalExpectedBytes,
+          "totalBytes" to totalExpectedBytes,
+          "speedKbps" to 0.0,
+          "error" to "",
+          "targetFileName" to targetFileName
+        )
+
+        if (versionDir.exists()) versionDir.deleteRecursively()
+        val renamed = stagingDir.renameTo(versionDir)
+        if (!renamed) {
+          versionDir.mkdirs()
+          stagingDir.copyRecursively(versionDir, overwrite = true)
+          stagingDir.deleteRecursively()
+        }
+
+        // 同步关键模型与配置文件至 modelDir 根目录，保证全局兼容性
+        versionDir.walkTopDown().filter { it.isFile }.forEach { source ->
+          val destination = File(modelDir, source.name)
+          if (destination.exists()) destination.delete()
+          source.copyTo(destination, overwrite = true)
+        }
+
+        tempFile.delete()
+        val modelToActivate = activeModelFileName ?: versionDir.walkTopDown().first {
+          it.isFile && it.extension.equals("onnx", ignoreCase = true)
+        }.name
+        setActiveModel(context, modelToActivate)
+      }
+      // 2. 如果下载的是 ZIP 压缩包
+      else if (targetFileName.endsWith(".zip", ignoreCase = true)) {
         downloadProgressState = mapOf(
           "status" to "extracting",
           "progress" to 1.0,
@@ -632,18 +766,51 @@ object OnnxTranslator {
           "error" to "",
           "targetFileName" to targetFileName
         )
-        unzipArchive(tempFile, modelDir)
-        tempFile.delete()
+        val versionName = targetFileName.removeSuffix(".zip").removeSuffix(".ZIP")
+        val stagingDir = File(modelDir, ".staging-$versionName")
+        val versionDir = File(modelDir, versionName)
 
-        // 探测解压出的主 onnx 文件并自动激活
-        val extractedOnnx = modelDir.listFiles()?.firstOrNull {
-          it.isFile && it.extension.equals("onnx", ignoreCase = true) && !it.name.endsWith(".download")
-        }
-        if (extractedOnnx != null) {
-          setActiveModel(context, extractedOnnx.name)
+        if (stagingDir.exists()) stagingDir.deleteRecursively()
+        stagingDir.mkdirs()
+        unzipArchive(tempFile, stagingDir)
+
+        // 验证解压包中是否存在指定的活跃模型入口文件
+        val hasActiveModel = if (!activeModelFileName.isNullOrBlank()) {
+          stagingDir.walkTopDown().any {
+            it.isFile && it.name == activeModelFileName && it.length() > 1024
+          }
         } else {
-          close()
-          init(context)
+          stagingDir.walkTopDown().any {
+            it.isFile && it.extension.equals("onnx", ignoreCase = true) && it.length() > 1024
+          }
+        }
+
+        if (hasActiveModel) {
+          // 原子替换：先准备新版本目录，验证成功后再切换
+          if (versionDir.exists()) versionDir.deleteRecursively()
+          val renamed = stagingDir.renameTo(versionDir)
+          if (!renamed) {
+            versionDir.mkdirs()
+            stagingDir.copyRecursively(versionDir, overwrite = true)
+            stagingDir.deleteRecursively()
+          }
+
+          // 保持平铺符号链接或复制关键模型文件到 modelDir 根目录，保证全局兼容性
+          versionDir.walkTopDown().filter { it.isFile }.forEach { source ->
+            val destination = File(modelDir, source.name)
+            if (destination.exists()) destination.delete()
+            source.copyTo(destination, overwrite = true)
+          }
+
+          tempFile.delete()
+          val modelToActivate = activeModelFileName ?: versionDir.walkTopDown().first {
+            it.isFile && it.extension.equals("onnx", ignoreCase = true)
+          }.name
+          setActiveModel(context, modelToActivate)
+        } else {
+          stagingDir.deleteRecursively()
+          tempFile.delete()
+          throw java.io.IOException("模型包缺少指定入口文件: ${activeModelFileName ?: "未配置"}")
         }
       } else {
         if (finalFile.exists()) finalFile.delete()
@@ -680,6 +847,19 @@ object OnnxTranslator {
       connection?.disconnect()
       isDownloading = false
     }
+  }
+
+  private fun sha256(file: File): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+    file.inputStream().buffered().use { input ->
+      val buffer = ByteArray(1024 * 1024)
+      var read = input.read(buffer)
+      while (read > 0) {
+        digest.update(buffer, 0, read)
+        read = input.read(buffer)
+      }
+    }
+    return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
   }
 
   private fun openConnectionWithRedirects(initialUrl: String, maxRedirects: Int = 6): java.net.HttpURLConnection {

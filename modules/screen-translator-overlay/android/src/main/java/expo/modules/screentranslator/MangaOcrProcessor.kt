@@ -340,7 +340,14 @@ object MangaOcrProcessor {
 
           val typeA = bA["textType"] as? String ?: ""
           val typeB = bB["textType"] as? String ?: ""
-          val isDuplicate = (typeA == typeB) && (iou > 0.60f || overlapRatio > 0.75f)
+          val textA = (bA["sourceText"] as? String ?: "").trim()
+          val textB = (bB["sourceText"] as? String ?: "").trim()
+          val cleanA = textA.replace(Regex("[\\s\\p{P}]+"), "")
+          val cleanB = textB.replace(Regex("[\\s\\p{P}]+"), "")
+          val hasTextRedundancy = cleanA.isNotEmpty() && cleanB.isNotEmpty() &&
+              (cleanA.contains(cleanB) || cleanB.contains(cleanA) || computeNormalizedSequenceSimilarity(textA, textB) >= 0.65f)
+
+          val isDuplicate = (typeA == typeB) && (iou > 0.60f || overlapRatio > 0.75f) && hasTextRedundancy
           if (isDuplicate) {
             val unionRect = Rect(
               min(rA.left, rB.left),
@@ -348,8 +355,6 @@ object MangaOcrProcessor {
               max(rA.right, rB.right),
               max(rA.bottom, rB.bottom)
             )
-            val textA = bA["sourceText"] as? String ?: ""
-            val textB = bB["sourceText"] as? String ?: ""
             val preferredText = when {
               textA.contains(textB) -> textA
               textB.contains(textA) -> textB
@@ -957,7 +962,23 @@ object MangaOcrProcessor {
               )
             )
           }
-          return mapOf(
+
+          val tightBox = if (ocrRes.chars.isNotEmpty()) {
+            val padX = 8
+            val padY = 6
+            val minX = max(0, ocrRes.chars.minOf { it.box.left }.toInt() + cropLeft - padX)
+            val maxX = min(srcW, ocrRes.chars.maxOf { it.box.right }.toInt() + cropLeft + padX)
+            val minY = max(0, ocrRes.chars.minOf { it.box.top }.toInt() + cropTop - padY)
+            val maxY = min(srcH, ocrRes.chars.maxOf { it.box.bottom }.toInt() + cropTop + padY)
+            mapOf(
+              "x" to minX,
+              "y" to minY,
+              "width" to max(1, maxX - minX),
+              "height" to max(1, maxY - minY)
+            )
+          } else null
+
+          val resultMap = mutableMapOf<String, Any>(
             "sourceText" to disambiguated,
             "lines" to listOf(disambiguated),
             "direction" to if (isVertical) "vertical" else "horizontal",
@@ -968,6 +989,10 @@ object MangaOcrProcessor {
             "ocrEngine" to "charspot",
             "chars" to charsPayload
           )
+          if (tightBox != null) {
+            resultMap["tightBox"] = tightBox
+          }
+          return resultMap
         }
       }
 
@@ -1116,7 +1141,22 @@ object MangaOcrProcessor {
       val baseConf = avgRawConf ?: weightConf
       val roundedConf = Math.round(baseConf.coerceIn(0.35f, 0.98f) * 100) / 100.0f
 
-      return mapOf(
+      val tightBox = if (sortedLines.isNotEmpty()) {
+        val padX = 6
+        val padY = 6
+        val minX = max(0, sortedLines.minOf { it.rect.left } - padX)
+        val maxX = min(srcW, sortedLines.maxOf { it.rect.right } + padX)
+        val minY = max(0, sortedLines.minOf { it.rect.top } - padY)
+        val maxY = min(srcH, sortedLines.maxOf { it.rect.bottom } + padY)
+        mapOf(
+          "x" to minX,
+          "y" to minY,
+          "width" to max(1, maxX - minX),
+          "height" to max(1, maxY - minY)
+        )
+      } else null
+
+      val resultMap = mutableMapOf<String, Any>(
         "sourceText" to fullText,
         "lines" to disambiguatedLines,
         "columnCount" to maxOf(1, disambiguatedLines.size),
@@ -1126,6 +1166,10 @@ object MangaOcrProcessor {
         "langColor" to langInfo.badgeColor,
         "confidence" to roundedConf
       )
+      if (tightBox != null) {
+        resultMap["tightBox"] = tightBox
+      }
+      return resultMap
     } catch (e: Exception) {
       return null
     } finally {
@@ -1183,14 +1227,6 @@ object MangaOcrProcessor {
       if (matchedExistingIndex >= 0) {
         val existing = resultList[matchedExistingIndex].toMutableMap()
         existing["detectorSource"] = "comic_model"
-        if (det.category == 2) {
-          existing["box"] = mapOf(
-            "x" to dRect.left,
-            "y" to dRect.top,
-            "width" to dRect.width(),
-            "height" to dRect.height()
-          )
-        }
 
         val curLines = (existing["lines"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
         val curText = existing["sourceText"] as? String ?: ""
@@ -1203,6 +1239,7 @@ object MangaOcrProcessor {
         val hasNoiseOrStutter = curText.any { it in '0'..'9' || it in setOf('|', 'l', '1', 'I', '/') } || curScore < 2.0f
         val isLikelyMultiCol = (curLines.size <= 1) && (dRect.width() >= 40 && dRect.height() >= 55 && aspect in 0.8f..3.8f)
 
+        var enhancedBoxApplied = false
         if (isLikelyMultiCol || curConf < 0.78f || curText.length <= 4 || curText.contains("?") || curText.contains("！") || curText.contains("…") || hasNoiseOrStutter || !existing.containsKey("chars")) {
           val enhanced = enhanceCandidateRegion(
             recognizer = recognizer,
@@ -1223,7 +1260,21 @@ object MangaOcrProcessor {
             if (enhanced.containsKey("chars")) {
               existing["chars"] = enhanced["chars"] as Any
             }
+            val tightBox = enhanced["tightBox"] as? Map<*, *>
+            if (tightBox != null) {
+              existing["box"] = tightBox
+              enhancedBoxApplied = true
+            }
           }
+        }
+
+        if (!enhancedBoxApplied && det.category == 2) {
+          existing["box"] = mapOf(
+            "x" to dRect.left,
+            "y" to dRect.top,
+            "width" to dRect.width(),
+            "height" to dRect.height()
+          )
         }
 
         val existingConf = (existing["confidence"] as? Number)?.toFloat() ?: 0.80f
@@ -1285,14 +1336,16 @@ object MangaOcrProcessor {
           ?: (Math.round((det.score * 0.4f + 0.50f) * 100) / 100.0f)
         val finalConf = if (hasValidOcr) ocrConf else (Math.round(det.score * 100) / 100.0f)
 
+        val boxToUse = (targetEnhancement?.get("tightBox") as? Map<*, *>) ?: mapOf(
+          "x" to dRect.left,
+          "y" to dRect.top,
+          "width" to dRect.width(),
+          "height" to dRect.height()
+        )
+
         val newBubble = mutableMapOf<String, Any>(
           "id" to "comic_det_${nextId++}",
-          "box" to mapOf(
-            "x" to dRect.left,
-            "y" to dRect.top,
-            "width" to dRect.width(),
-            "height" to dRect.height()
-          ),
+          "box" to boxToUse,
           "sourceText" to displaySourceText,
           "targetText" to "",
           "direction" to (targetEnhancement?.get("direction") as? String ?: if (dRect.height() > dRect.width() * 1.15f) "vertical" else "horizontal"),

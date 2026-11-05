@@ -715,7 +715,7 @@ class ScreenTranslatorOverlayModule : Module() {
       }
     }
 
-    AsyncFunction("onnxDownloadModel") { url: String, targetFileName: String, promise: Promise ->
+    AsyncFunction("onnxDownloadModel") { url: String, targetFileName: String, expectedSha256: String?, activeModelFileName: String?, promise: Promise ->
       val context = appContext.reactContext
       if (context == null) {
         promise.resolve(false)
@@ -723,7 +723,7 @@ class ScreenTranslatorOverlayModule : Module() {
       }
       CoroutineScope(Dispatchers.IO).launch {
         try {
-          val ok = OnnxTranslator.downloadModel(context, url, targetFileName)
+          val ok = OnnxTranslator.downloadModel(context, url, targetFileName, expectedSha256, activeModelFileName)
           promise.resolve(ok)
         } catch (e: Exception) {
           promise.reject("ONNX_DOWNLOAD_ERROR", e.message ?: "下载模型失败", e)
