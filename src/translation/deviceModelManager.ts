@@ -63,14 +63,28 @@ export class DeviceModelManager {
     if (!pack.sha256) {
       throw new Error(`模型 ${pack.displayName} 尚未配置 SHA-256，拒绝不安全下载`);
     }
-    const installed = await onnxDownloadModel(
-      pack.downloadUrl,
-      pack.archiveFileName,
-      pack.sha256,
-      pack.activeModelFileName
-    );
-    if (!installed) return false;
-    return this.activate(id);
+    console.log(`[DeviceModelManager] 开始下载模型: ${pack.displayName}`);
+    console.log(`  URL: ${pack.downloadUrl}`);
+    console.log(`  Target: ${pack.archiveFileName}`);
+    console.log(`  Expected SHA-256: ${pack.sha256}`);
+
+    try {
+      const installed = await onnxDownloadModel(
+        pack.downloadUrl,
+        pack.archiveFileName,
+        pack.sha256,
+        pack.activeModelFileName
+      );
+      if (!installed) {
+        const progress = onnxGetDownloadProgress();
+        const errorDetail = progress.error ? ` (${progress.error})` : '';
+        throw new Error(`下载中断或失败${errorDetail}`);
+      }
+      return this.activate(id);
+    } catch (err: any) {
+      console.error(`[DeviceModelManager] 模型下载发生异常:`, err);
+      throw err;
+    }
   }
 
   cancelInstall(): void {

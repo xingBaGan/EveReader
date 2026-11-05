@@ -116,7 +116,9 @@ export default function ProfileScreen() {
       setBusyModel(id);
       await deviceModelManager.install(id);
       await refreshModelStatuses();
+      Alert.alert('下载成功', '端侧模型已就绪并自动设为当前翻译模型');
     } catch (error: any) {
+      console.error('[Profile] 安装模型失败:', error);
       Alert.alert('模型安装失败', error?.message || '无法安装端侧翻译模型');
     } finally {
       setBusyModel(null);
