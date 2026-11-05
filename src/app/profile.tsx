@@ -205,17 +205,24 @@ export default function ProfileScreen() {
                         ? '等待配置下载地址'
                         : unavailable
                           ? '当前平台不可用'
-                          : status?.state === 'installing'
-                            ? `下载中 ${Math.max(0, Math.round(progress * 100))}%`
+                          : status?.state === 'installing' || isBusy
+                            ? `下载中 ${progress > 0 ? Math.round(progress * 100) : 0}%`
                             : isInstalled
                               ? '已安装'
                               : '未安装'}
                     </Text>
                   </View>
 
-                  {status?.state === 'installing' ? (
+                  {status?.state === 'installing' || isBusy ? (
                     <View style={styles.progressTrack}>
-                      <View style={[styles.progressFill, { width: `${Math.max(0, progress * 100)}%` }]} />
+                      <View
+                        style={[
+                          styles.progressFill,
+                          {
+                            width: `${Math.max(progress > 0 ? progress * 100 : 8, 8)}%`,
+                          },
+                        ]}
+                      />
                     </View>
                   ) : null}
 

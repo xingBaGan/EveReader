@@ -551,7 +551,7 @@ object OnnxTranslator {
 
     downloadProgressState = mapOf(
       "status" to "downloading",
-      "progress" to 0.0,
+      "progress" to 0.001,
       "downloadedBytes" to 0L,
       "totalBytes" to 0L,
       "speedKbps" to 0.0,
@@ -875,8 +875,8 @@ object OnnxTranslator {
     while (redirects < maxRedirects) {
       val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
       conn.instanceFollowRedirects = false
-      conn.connectTimeout = 15000
-      conn.readTimeout = 30000
+      conn.connectTimeout = 30000
+      conn.readTimeout = 120000
       conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android; Mobile; ScreenTranslator)")
       conn.connect()
       val code = conn.responseCode
