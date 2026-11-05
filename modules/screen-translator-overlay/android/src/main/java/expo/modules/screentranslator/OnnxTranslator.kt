@@ -539,7 +539,14 @@ object OnnxTranslator {
       modelDir.mkdirs()
     }
 
-    val tempFile = File(modelDir, "$targetFileName.download")
+    val progressKey = if (targetFileName.equals("manifest.json", ignoreCase = true) || downloadUrl.endsWith("manifest.json", ignoreCase = true)) {
+      val segs = downloadUrl.trimEnd('/').split('/')
+      if (segs.size >= 2) segs[segs.size - 2] else targetFileName
+    } else {
+      targetFileName
+    }
+
+    val tempFile = File(modelDir, "$progressKey.download")
     val finalFile = File(modelDir, targetFileName)
 
     downloadProgressState = mapOf(
@@ -549,7 +556,7 @@ object OnnxTranslator {
       "totalBytes" to 0L,
       "speedKbps" to 0.0,
       "error" to "",
-      "targetFileName" to targetFileName
+      "targetFileName" to progressKey
     )
 
     var connection: java.net.HttpURLConnection? = null
@@ -703,7 +710,7 @@ object OnnxTranslator {
                     "totalBytes" to totalExpectedBytes,
                     "speedKbps" to spd,
                     "error" to "",
-                    "targetFileName" to relPath
+                    "targetFileName" to progressKey
                   )
                   lastUpd = now
                   bytesDelta = 0L

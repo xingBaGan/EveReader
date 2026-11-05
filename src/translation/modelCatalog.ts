@@ -35,7 +35,7 @@ export const DEVICE_MODEL_CATALOG: readonly DeviceModelPack[] = [
     displayName: 'Fast v1 标准离线翻译包',
     description: '标准全量化 INT8 模型，推断延迟极低（~64ms），抗 OCR 噪声鲁棒性最优。',
     expectedBytes: 502957448,
-    archiveFileName: 'manifest.json',
+    archiveFileName: 'fast-int8',
     activeModelFileName: 'encoder_int8.onnx',
     filePrefix: 'fast-int8',
     downloadUrl: process.env.EXPO_PUBLIC_JMANGA_FAST_INT8_URL || 'https://models.atujii.top/jmt-fast/v1/fast-int8/2026-11-04/manifest.json',
@@ -49,7 +49,7 @@ export const DEVICE_MODEL_CATALOG: readonly DeviceModelPack[] = [
     displayName: 'Fast v1 高清增强翻译包',
     description: 'Encoder 4-bit + Decoder 8-bit 混合量化，品质媲美浮点（BLEU 22.54），Wi-Fi 下推荐下载。',
     expectedBytes: 635846427,
-    archiveFileName: 'manifest.json',
+    archiveFileName: 'fast-mixed-int4-int8',
     activeModelFileName: 'encoder_int4.onnx',
     filePrefix: 'fast-mixed-int4-int8',
     downloadUrl: process.env.EXPO_PUBLIC_JMANGA_FAST_MIXED_URL || 'https://models.atujii.top/jmt-fast/v1/fast-mixed-int4-int8/2026-11-04/manifest.json',
@@ -63,7 +63,7 @@ export const DEVICE_MODEL_CATALOG: readonly DeviceModelPack[] = [
     displayName: 'NanoSakura 2.2 离线基础包 (实验性)',
     description: 'Transformer-Mamba2 SSM 极小模型，目前量化状态存在循环漂移风险，暂不推荐生产使用。',
     expectedBytes: mb(188),
-    archiveFileName: 'nanosakura-2.2-int8.zip',
+    archiveFileName: 'nanosakura-2.2-int8',
     activeModelFileName: 'encoder.onnx',
     filePrefix: 'nanosakura-2.2-int8',
     downloadUrl: process.env.EXPO_PUBLIC_NANOSAKURA_INT8_URL ?? '',
@@ -73,6 +73,7 @@ export const DEVICE_MODEL_CATALOG: readonly DeviceModelPack[] = [
     experimental: true,
   },
 ] as const;
+
 
 
 
