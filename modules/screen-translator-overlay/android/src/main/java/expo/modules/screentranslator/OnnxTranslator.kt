@@ -574,8 +574,8 @@ object OnnxTranslator {
       var lastUpdateTime = System.currentTimeMillis()
       var bytesSinceLastUpdate = 0L
 
-      connection.inputStream.use { input ->
-        FileOutputStream(tempFile).use { output ->
+      java.io.BufferedInputStream(connection.inputStream, 65536).use { input ->
+        java.io.BufferedOutputStream(FileOutputStream(tempFile), 65536).use { output ->
           var bytesRead = input.read(buffer)
           while (bytesRead != -1) {
             if (cancelDownloadFlag) {
@@ -598,7 +598,7 @@ object OnnxTranslator {
 
             val now = System.currentTimeMillis()
             val timeDiff = now - lastUpdateTime
-            if (timeDiff >= 300) {
+            if (timeDiff >= 400) {
               val speedKbps = if (timeDiff > 0) (bytesSinceLastUpdate / 1024.0) / (timeDiff / 1000.0) else 0.0
               val progress = if (contentLength > 0) min(1.0, downloadedBytes.toDouble() / contentLength) else -1.0
 
@@ -680,8 +680,8 @@ object OnnxTranslator {
             throw java.io.IOException("下载分块文件失败 $relPath (HTTP ${fileConn.responseCode})")
           }
 
-          fileConn.inputStream.use { inStream ->
-            FileOutputStream(fileDest).use { outStream ->
+          java.io.BufferedInputStream(fileConn.inputStream, 65536).use { inStream ->
+            java.io.BufferedOutputStream(FileOutputStream(fileDest), 65536).use { outStream ->
               val chunkBuf = ByteArray(65536)
               var r = inStream.read(chunkBuf)
               var lastUpd = System.currentTimeMillis()
@@ -699,7 +699,7 @@ object OnnxTranslator {
 
                 val now = System.currentTimeMillis()
                 val diff = now - lastUpd
-                if (diff >= 300) {
+                if (diff >= 400) {
                   val spd = if (diff > 0) (bytesDelta / 1024.0) / (diff / 1000.0) else 0.0
                   val prog = if (totalExpectedBytes > 0) min(1.0, completedBytes.toDouble() / totalExpectedBytes) else -1.0
                   downloadProgressState = mapOf(
@@ -718,7 +718,6 @@ object OnnxTranslator {
               }
             }
           }
-          fileConn.disconnect()
 
           // 严格校验每个下载文件的 SHA-256
           val actualFileSha = sha256(fileDest)
@@ -874,9 +873,13 @@ object OnnxTranslator {
     while (redirects < maxRedirects) {
       val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
       conn.instanceFollowRedirects = false
+      conn.useCaches = false
       conn.connectTimeout = 30000
       conn.readTimeout = 120000
       conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android; Mobile; ScreenTranslator)")
+      conn.setRequestProperty("Accept-Encoding", "identity")
+      conn.setRequestProperty("Connection", "keep-alive")
+      conn.setRequestProperty("Accept", "*/*")
       conn.connect()
       val code = conn.responseCode
       if (code in 300..399) {
