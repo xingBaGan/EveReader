@@ -43,7 +43,8 @@ export class DeviceModelManager {
       (progress.status === 'downloading' || progress.status === 'extracting') &&
       (progress.targetFileName === pack.archiveFileName ||
         progress.targetFileName.includes(pack.filePrefix) ||
-        pack.archiveFileName.includes(progress.targetFileName));
+        pack.archiveFileName.includes(progress.targetFileName) ||
+        (progress.totalBytes > 0 && progress.totalBytes === pack.expectedBytes));
     return {
       pack,
       files,
