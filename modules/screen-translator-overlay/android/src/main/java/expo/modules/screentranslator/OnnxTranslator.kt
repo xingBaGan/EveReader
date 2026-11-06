@@ -13,6 +13,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import java.io.BufferedReader
 import java.io.File
@@ -517,6 +518,14 @@ object OnnxTranslator {
       .followRedirects(true)
       .followSslRedirects(true)
       .retryOnConnectionFailure(true)
+      .build()
+  }
+
+  // Range 小块使用独立 HTTP/1.1 短连接。HTTP/2 会把 4 个并发流复用在同一条
+  // TCP 连接上，一旦移动网络发生丢包或拥塞，所有分片会同时降速。
+  private val rangeHttpClient: OkHttpClient by lazy {
+    downloadHttpClient.newBuilder()
+      .protocols(listOf(Protocol.HTTP_1_1))
       .build()
   }
 
@@ -1151,8 +1160,16 @@ object OnnxTranslator {
     if (cancelDownloadFlag) throw DownloadCancelledException()
     if (abortFlag.get()) throw java.io.IOException("Range 分片下载已中止")
 
-    val call = newDownloadCall(url, mapOf("Range" to "bytes=$start-$end"))
+    val call = newDownloadCall(
+      url,
+      mapOf(
+        "Range" to "bytes=$start-$end",
+        "Connection" to "close"
+      ),
+      forceHttp1 = true
+    )
     activeCalls.add(call)
+    val requestStartedAt = System.currentTimeMillis()
     try {
       if (abortFlag.get()) throw java.io.IOException("Range 分片下载已中止")
       if (cancelDownloadFlag) throw DownloadCancelledException()
@@ -1178,8 +1195,6 @@ object OnnxTranslator {
         if (headerLength >= 0L && headerLength != expectedLength) {
           throw RangeDownloadUnsupportedException("Content-Length 与分片大小不符: $headerLength / $expectedLength")
         }
-        if (partIndex == 0) Log.i(TAG, "OkHttp Range 协议: ${response.protocol}")
-
         var written = 0L
         java.io.BufferedInputStream(body.byteStream(), DOWNLOAD_BUFFER_SIZE).use { input ->
           java.io.BufferedOutputStream(FileOutputStream(partFile), DOWNLOAD_BUFFER_SIZE).use { output ->
@@ -1202,6 +1217,15 @@ object OnnxTranslator {
         if (written != expectedLength) {
           throw java.io.IOException("Range 分片不完整: $written / $expectedLength")
         }
+        val elapsedMs = (System.currentTimeMillis() - requestStartedAt).coerceAtLeast(1L)
+        val averageKbps = (written / 1024.0) / (elapsedMs / 1000.0)
+        Log.i(
+          TAG,
+          "Range 块 #$partIndex 完成: ${response.protocol}, " +
+            "cache=${response.header("CF-Cache-Status") ?: "?"}, " +
+            "colo=${response.header("CF-Ray")?.substringAfterLast('-') ?: "?"}, " +
+            "${String.format(java.util.Locale.US, "%.0f", averageKbps)} KB/s"
+        )
       }
     } catch (e: Exception) {
       // 一个分片失败时立刻中断其余分片，避免继续消耗流量
@@ -1226,7 +1250,11 @@ object OnnxTranslator {
     return Triple(start, end, total)
   }
 
-  private fun newDownloadCall(url: String, extraHeaders: Map<String, String> = emptyMap()): Call {
+  private fun newDownloadCall(
+    url: String,
+    extraHeaders: Map<String, String> = emptyMap(),
+    forceHttp1: Boolean = false
+  ): Call {
     val request = Request.Builder()
       .url(url)
       .header("User-Agent", "Mozilla/5.0 (Android; Mobile; ScreenTranslator)")
@@ -1236,7 +1264,7 @@ object OnnxTranslator {
         for ((name, value) in extraHeaders) header(name, value)
       }
       .build()
-    return downloadHttpClient.newCall(request)
+    return (if (forceHttp1) rangeHttpClient else downloadHttpClient).newCall(request)
   }
 
   private fun publishDownloadProgress(
