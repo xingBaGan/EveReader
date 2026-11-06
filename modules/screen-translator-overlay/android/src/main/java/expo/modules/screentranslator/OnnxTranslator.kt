@@ -9,7 +9,6 @@ import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.Call
@@ -23,6 +22,7 @@ import java.nio.LongBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 
 /**
@@ -504,7 +504,8 @@ object OnnxTranslator {
   // 只有足够大的 manifest 文件才值得启用多连接 Range 下载：
   // 4 路并发至少每路 2MiB，既能摊薄单连接被限速的影响，也不至于让小文件承担连接开销。
   private const val RANGE_DOWNLOAD_MIN_BYTES = 8L * 1024L * 1024L
-  private const val RANGE_DOWNLOAD_MAX_PARTS = 4
+  private const val RANGE_DOWNLOAD_CONCURRENCY = 4
+  private const val RANGE_DOWNLOAD_CHUNK_BYTES = 2L * 1024L * 1024L
   private const val DOWNLOAD_PROGRESS_INTERVAL_MS = 400L
   private const val DOWNLOAD_BUFFER_SIZE = 65536
 
@@ -1033,7 +1034,8 @@ object OnnxTranslator {
   }
 
   /**
-   * 4 路 Range 并发下载：每片写入独立临时文件，全部完成后再按顺序流式合并。
+   * 4 路 worker 按固定 2MiB 小块执行 Range 下载：每块完成后立刻领取下一块，
+   * 避免单个超长响应在移动网络或 R2 回源路径上逐渐降速，也让 CDN 能缓存完整 Range 块。
    * 服务器不支持（非 206 / Content-Range 不匹配）或任一分片失败时抛出异常，由调用方回退。
    */
   private suspend fun downloadFileRanged(
@@ -1044,13 +1046,14 @@ object OnnxTranslator {
     totalExpectedBytes: Long,
     progressKey: String
   ) {
-    val partCount = RANGE_DOWNLOAD_MAX_PARTS
-    val partSize = (expectedFileBytes + partCount - 1) / partCount
+    val partSize = RANGE_DOWNLOAD_CHUNK_BYTES
+    val partCount = ((expectedFileBytes + partSize - 1) / partSize).toInt()
+    val workerCount = min(RANGE_DOWNLOAD_CONCURRENCY, partCount)
     val tempDir = File(fileDest.parentFile, ".rangedl-${fileDest.name}-${System.nanoTime()}")
     if (!tempDir.mkdirs() && !tempDir.isDirectory) {
       throw java.io.IOException("无法创建 Range 临时目录: ${tempDir.absolutePath}")
     }
-    Log.i(TAG, "模型分片 Range 并发下载: ${fileDest.name} ($expectedFileBytes bytes, $partCount 路)")
+    Log.i(TAG, "模型 Range 小块并发下载: ${fileDest.name} ($expectedFileBytes bytes, $partCount 块, $workerCount 路)")
 
     try {
       val abortFlag = AtomicBoolean(false)
@@ -1070,22 +1073,30 @@ object OnnxTranslator {
       }
 
       coroutineScope {
-        (0 until partCount).map { index ->
-          val start = index.toLong() * partSize
-          val end = min((index + 1).toLong() * partSize - 1, expectedFileBytes - 1)
+        val nextPart = AtomicInteger(0)
+        val workers = (0 until workerCount).map {
           async(Dispatchers.IO) {
-            downloadRangePart(
-              url = fileUrl,
-              partFile = File(tempDir, "part$index.tmp"),
-              start = start,
-              end = end,
-              totalFileBytes = expectedFileBytes,
-              partIndex = index,
-              aggregator = aggregator,
-              abortFlag = abortFlag
-            )
+            while (true) {
+              val index = nextPart.getAndIncrement()
+              if (index >= partCount) break
+              if (cancelDownloadFlag) throw DownloadCancelledException()
+              if (abortFlag.get()) throw java.io.IOException("Range 小块下载已中止")
+              val start = index.toLong() * partSize
+              val end = min(start + partSize - 1, expectedFileBytes - 1)
+              downloadRangePart(
+                url = fileUrl,
+                partFile = File(tempDir, "part$index.tmp"),
+                start = start,
+                end = end,
+                totalFileBytes = expectedFileBytes,
+                partIndex = index,
+                aggregator = aggregator,
+                abortFlag = abortFlag
+              )
+            }
           }
-        }.awaitAll()
+        }
+        workers.forEach { it.await() }
       }
 
       if (cancelDownloadFlag) throw DownloadCancelledException()
@@ -1410,7 +1421,7 @@ private class DownloadCancelledException : java.io.IOException("用户已取消�
 private class RangeDownloadUnsupportedException(message: String) : java.io.IOException(message)
 
 /**
- * Range 分片进度聚合器：4 个下载线程共享计数，锁内只做加法与快照，
+ * Range 分片进度聚合器：多个下载 worker 共享计数，锁内只做加法与快照，
  * 锁外发布不可变进度 Map，保证 downloadedBytes/progress/speedKbps 不会被并发覆盖成错误值。
  */
 private class RangeProgressAggregator(
@@ -1427,7 +1438,7 @@ private class RangeProgressAggregator(
   fun add(partIndex: Int, delta: Long) {
     if (delta <= 0L || partIndex !in partBytes.indices) return
 
-    // 在锁内发布快照，保证 4 个线程的进度不会以旧值覆盖新值
+    // 在锁内发布快照，保证多个 worker 的进度不会以旧值覆盖新值
     synchronized(this) {
       partBytes[partIndex] += delta
       windowBytes += delta
