@@ -37,7 +37,9 @@ export class DeviceModelManager {
     const progress = onnxGetDownloadProgress();
     const installing =
       (progress.status === 'downloading' || progress.status === 'extracting') &&
-      progress.targetFileName === pack.archiveFileName;
+      (progress.targetFileName === pack.archiveFileName ||
+        progress.targetFileName.includes(pack.filePrefix) ||
+        pack.archiveFileName.includes(progress.targetFileName));
     return {
       pack,
       files,
@@ -49,7 +51,7 @@ export class DeviceModelManager {
           : installed
             ? 'installed'
             : 'not-installed',
-      error: progress.status === 'error' && progress.targetFileName === pack.archiveFileName
+      error: progress.status === 'error' && (progress.targetFileName === pack.archiveFileName || progress.targetFileName.includes(pack.filePrefix))
         ? progress.error
         : undefined,
     };

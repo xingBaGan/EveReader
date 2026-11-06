@@ -34,6 +34,9 @@ import {
 
 const deviceModelManager = new DeviceModelManager();
 
+const formatMegabytes = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+const formatKbps = (speedKbps: number) => `${Math.max(0, Math.round(speedKbps))} KB/s`;
+
 export default function ProfileScreen() {
   const user = useAuthStore((s) => s.user);
   const setUser = useAuthStore((s) => s.setUser);
@@ -79,7 +82,18 @@ export default function ProfileScreen() {
 
   useEffect(() => {
     if (!busyModel) return;
-    const timer = setInterval(refreshModelStatuses, 500);
+    const timer = setInterval(async () => {
+      await refreshModelStatuses();
+      const status = busyModel ? await deviceModelManager.getStatus(busyModel) : null;
+      if (status?.progress?.status === 'downloading') {
+        const p = status.progress;
+        const pct = p.progress > 0 ? (p.progress * 100).toFixed(1) : '0.0';
+        const spd = p.speedKbps >= 1024 ? `${(p.speedKbps / 1024).toFixed(2)} MB/s` : `${Math.round(p.speedKbps)} KB/s`;
+        const dlMb = (p.downloadedBytes / (1024 * 1024)).toFixed(1);
+        const totMb = (p.totalBytes / (1024 * 1024)).toFixed(1);
+        console.log(`[ModelDownload] ${status.pack.displayName}: ${pct}% (${dlMb}/${totMb} MB) @ ${spd} [${p.targetFileName}]`);
+      }
+    }, 500);
     return () => clearInterval(timer);
   }, [busyModel, refreshModelStatuses]);
 
@@ -179,6 +193,7 @@ export default function ProfileScreen() {
               const status = modelStatuses[pack.id];
               const isBusy = busyModel === pack.id;
               const progress = status?.progress?.progress ?? 0;
+              const downloadProgress = status?.progress;
               const isInstalled = status?.state === 'installed' || status?.state === 'active';
               const unavailable = status?.state === 'unavailable';
               const missingConfig = !pack.downloadUrl || !pack.sha256;
@@ -208,7 +223,9 @@ export default function ProfileScreen() {
                         : unavailable
                           ? '当前平台不可用'
                           : status?.state === 'installing' || isBusy
-                            ? `下载中 ${progress > 0 ? Math.round(progress * 100) : 0}%`
+                            ? downloadProgress?.status === 'extracting'
+                              ? '校验并部署中'
+                              : `下载中 ${progress > 0 ? (progress * 100).toFixed(1) : '0.0'}%`
                             : isInstalled
                               ? '已安装'
                               : '未安装'}
@@ -216,16 +233,29 @@ export default function ProfileScreen() {
                   </View>
 
                   {status?.state === 'installing' || isBusy ? (
-                    <View style={styles.progressTrack}>
-                      <View
-                        style={[
-                          styles.progressFill,
-                          {
-                            width: `${Math.max(progress > 0 ? progress * 100 : 8, 8)}%`,
-                          },
-                        ]}
-                      />
-                    </View>
+                    <>
+                      <View style={styles.progressTrack}>
+                        <View
+                          style={[
+                            styles.progressFill,
+                            {
+                              width: `${Math.max(progress > 0 ? progress * 100 : 8, 8)}%`,
+                            },
+                          ]}
+                        />
+                      </View>
+                      <View style={styles.downloadStatsRow}>
+                        <Text style={styles.downloadSpeed}>
+                          {downloadProgress?.status === 'extracting'
+                            ? '正在校验文件'
+                            : formatKbps(downloadProgress?.speedKbps ?? 0)}
+                        </Text>
+                        <Text style={styles.downloadBytes}>
+                          {formatMegabytes(downloadProgress?.downloadedBytes ?? 0)} /{' '}
+                          {formatMegabytes(downloadProgress?.totalBytes || pack.expectedBytes)}
+                        </Text>
+                      </View>
+                    </>
                   ) : null}
 
                   <View style={styles.modelActions}>
@@ -531,6 +561,23 @@ const styles = StyleSheet.create({
   progressFill: {
     height: 4,
     backgroundColor: '#8b5cf6',
+  },
+  downloadStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 6,
+  },
+  downloadSpeed: {
+    color: '#c4b5fd',
+    fontSize: 11,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  downloadBytes: {
+    color: '#64748b',
+    fontSize: 10,
+    fontVariant: ['tabular-nums'],
   },
   modelActions: {
     flexDirection: 'row',
