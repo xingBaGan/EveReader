@@ -912,6 +912,22 @@ object MangaOcrProcessor {
    * 针对未识别出文字的艺术字/拟声词候选区域进行定向靶向 ROI 识别
    * (采用局部多尺度放大/缩小、高反差、反相、微旋转，耗时极短且具备极高敏感度)
    */
+  private fun inferCharSpotDirection(
+    chars: List<MangaOcrModel.CharBox>,
+    regionRect: Rect
+  ): Boolean {
+    val positioned = chars.filter { it.box.width() > 0f && it.box.height() > 0f }
+    if (positioned.size >= 2) {
+      val centersX = positioned.map { it.box.centerX() }
+      val centersY = positioned.map { it.box.centerY() }
+      val spreadX = (centersX.maxOrNull() ?: 0f) - (centersX.minOrNull() ?: 0f)
+      val spreadY = (centersY.maxOrNull() ?: 0f) - (centersY.minOrNull() ?: 0f)
+      if (spreadY > spreadX * 1.15f) return true
+      if (spreadX > spreadY * 1.15f) return false
+    }
+    return regionRect.height() > regionRect.width() * 1.15f
+  }
+
   private suspend fun enhanceCandidateRegion(
     recognizer: TextRecognizer,
     sourceBitmap: Bitmap,
@@ -939,6 +955,7 @@ object MangaOcrProcessor {
     var infilledBmp: Bitmap? = null
     var contrastBmp: Bitmap? = null
     var invertBmp: Bitmap? = null
+    var charSpotFallback: Map<String, Any>? = null
 
     try {
       cropBmp = Bitmap.createBitmap(sourceBitmap, cropLeft, cropTop, cropW, cropH)
@@ -948,7 +965,7 @@ object MangaOcrProcessor {
         val ocrRes = MangaOcrModel.recognizeDetail(cropBmp)
         if (ocrRes.text.isNotBlank() && !isJunkNoiseLine(ocrRes.text, regionRect)) {
           val disambiguated = disambiguateMangaCharacters(ocrRes.text)
-          val isVertical = regionRect.height() > regionRect.width() * 1.15f
+          val isVertical = inferCharSpotDirection(ocrRes.chars, regionRect)
           val langInfo = detectLanguage(disambiguated, preferredLang, screenHasJapanese)
           val charsPayload = ocrRes.chars.map { c ->
             mapOf(
@@ -985,14 +1002,27 @@ object MangaOcrProcessor {
             "detectedLang" to langInfo.langCode,
             "langName" to langInfo.langName,
             "langColor" to langInfo.badgeColor,
-            "confidence" to max(0.92f, ocrRes.avgScore),
+            "confidence" to ocrRes.avgScore.coerceIn(0f, 1f),
             "ocrEngine" to "charspot",
             "chars" to charsPayload
           )
           if (tightBox != null) {
             resultMap["tightBox"] = tightBox
           }
-          return resultMap
+
+          val meaningfulCharCount = disambiguated.count { ch ->
+            ch.isLetterOrDigit() || ch in '\u3040'..'\u30FF' || ch in '\u3400'..'\u9FFF'
+          }
+          val needsCrossCheck = isVertical && meaningfulCharCount <= 2 && ocrRes.avgScore < 0.90f
+          android.util.Log.i(
+            "BubbleOCR",
+            "[CHARSPOT_CANDIDATE] region=${regionRect.width()}x${regionRect.height()} " +
+              "crop=${cropW}x${cropH} text='$disambiguated' chars=${ocrRes.chars.size} " +
+              "meaningful=$meaningfulCharCount avgScore=${ocrRes.avgScore} " +
+              "direction=${if (isVertical) "vertical" else "horizontal"} crossCheck=$needsCrossCheck"
+          )
+          if (!needsCrossCheck) return resultMap
+          charSpotFallback = resultMap
         }
       }
 
@@ -1086,7 +1116,7 @@ object MangaOcrProcessor {
       }
 
       // 7. Manga-OCR 针对增强切片的多通道重试 (若首轮原切片为空，利用实心化/色彩通道重试激活 ViT 深度能力)
-      if (detectedLines.isEmpty() && MangaOcrModel.isModelReady) {
+      if (detectedLines.isEmpty() && charSpotFallback == null && MangaOcrModel.isModelReady) {
         val retryCandidates = listOfNotNull(colorBmp, infilledBmp, contrastBmp, invertBmp)
         for (cand in retryCandidates) {
           val retryText = MangaOcrModel.recognize(cand)
@@ -1107,10 +1137,10 @@ object MangaOcrProcessor {
         }
       }
 
-      if (detectedLines.isEmpty()) return null
+      if (detectedLines.isEmpty()) return charSpotFallback
 
       val deduplicated = deduplicateLines(detectedLines)
-      if (deduplicated.isEmpty()) return null
+      if (deduplicated.isEmpty()) return charSpotFallback
 
       // 判断纵横排方向
       val verticalCount = deduplicated.count { it.isVertical || it.rect.height() > it.rect.width() * 1.15f }
@@ -1126,10 +1156,10 @@ object MangaOcrProcessor {
       val consolidatedText = consolidateGroupCandidates(sortedLines, isVertical)
 
       // 多通道扫描已产出统一文本；若为空则说明该区域无有效文字
-      if (consolidatedText.isBlank()) return null
+      if (consolidatedText.isBlank()) return charSpotFallback
       val finalText = consolidatedText
 
-      if (finalText.isBlank() || isJunkNoiseLine(finalText, regionRect)) return null
+      if (finalText.isBlank() || isJunkNoiseLine(finalText, regionRect)) return charSpotFallback
       val disambiguatedText = disambiguateMangaCharacters(finalText)
       val disambiguatedLines = disambiguatedText.split(if (isVertical) "\n" else " ").filter { it.isNotBlank() }
       val fullText = disambiguatedText
