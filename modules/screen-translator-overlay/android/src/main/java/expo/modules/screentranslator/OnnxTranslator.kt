@@ -509,6 +509,8 @@ object OnnxTranslator {
   private const val RANGE_DOWNLOAD_CONCURRENCY = 4
   private const val RANGE_DOWNLOAD_CHUNK_BYTES = 2L * 1024L * 1024L
   private const val RANGE_DOWNLOAD_MAX_RETRIES = 3
+  private const val RANGE_TAIL_LOW_SPEED_WINDOW_MS = 10_000L
+  private const val RANGE_TAIL_MIN_SPEED_KBPS = 48.0
   private const val DOWNLOAD_PROGRESS_INTERVAL_MS = 400L
   private const val DOWNLOAD_BUFFER_SIZE = 65536
 
@@ -1087,6 +1089,7 @@ object OnnxTranslator {
 
       coroutineScope {
         val nextPart = AtomicInteger(0)
+        val completedParts = AtomicInteger(0)
         val workers = (0 until workerCount).map {
           async(Dispatchers.IO) {
             while (true) {
@@ -1108,8 +1111,10 @@ object OnnxTranslator {
                     totalFileBytes = expectedFileBytes,
                     partIndex = index,
                     aggregator = aggregator,
-                    abortFlag = abortFlag
+                    abortFlag = abortFlag,
+                    isTailPart = { completedParts.get() >= partCount - 1 }
                   )
+                  completedParts.incrementAndGet()
                   break
                 } catch (e: DownloadCancelledException) {
                   throw e
@@ -1120,7 +1125,13 @@ object OnnxTranslator {
                   aggregator.resetPart(index)
                   attempt++
                   if (attempt > RANGE_DOWNLOAD_MAX_RETRIES) throw e
-                  publishRetryProgress(progressKey, index, attempt, RANGE_DOWNLOAD_MAX_RETRIES)
+                  publishRetryProgress(
+                    progressKey,
+                    index,
+                    attempt,
+                    RANGE_DOWNLOAD_MAX_RETRIES,
+                    lowSpeed = e is RangeDownloadLowSpeedException
+                  )
                   Log.w(TAG, "Range 块 #$index 失败，重试 $attempt/$RANGE_DOWNLOAD_MAX_RETRIES: ${e.message}")
                   delay(500L * attempt)
                 }
@@ -1180,7 +1191,8 @@ object OnnxTranslator {
     totalFileBytes: Long,
     partIndex: Int,
     aggregator: RangeProgressAggregator,
-    abortFlag: AtomicBoolean
+    abortFlag: AtomicBoolean,
+    isTailPart: () -> Boolean
   ) {
     val expectedLength = end - start + 1
     if (start < 0L || end < start) {
@@ -1225,6 +1237,8 @@ object OnnxTranslator {
           throw RangeDownloadUnsupportedException("Content-Length 与分片大小不符: $headerLength / $expectedLength")
         }
         var written = 0L
+        var speedWindowStartedAt = System.currentTimeMillis()
+        var speedWindowBytes = 0L
         java.io.BufferedInputStream(body.byteStream(), DOWNLOAD_BUFFER_SIZE).use { input ->
           java.io.BufferedOutputStream(FileOutputStream(partFile), DOWNLOAD_BUFFER_SIZE).use { output ->
             val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
@@ -1240,6 +1254,18 @@ object OnnxTranslator {
               }
               output.write(buffer, 0, bytesRead)
               aggregator.add(partIndex, bytesRead.toLong())
+
+              speedWindowBytes += bytesRead
+              val now = System.currentTimeMillis()
+              val speedWindowElapsedMs = now - speedWindowStartedAt
+              if (speedWindowElapsedMs >= RANGE_TAIL_LOW_SPEED_WINDOW_MS) {
+                val windowSpeedKbps = (speedWindowBytes / 1024.0) / (speedWindowElapsedMs / 1000.0)
+                if (isTailPart() && windowSpeedKbps < RANGE_TAIL_MIN_SPEED_KBPS) {
+                  throw RangeDownloadLowSpeedException(windowSpeedKbps)
+                }
+                speedWindowStartedAt = now
+                speedWindowBytes = 0L
+              }
             }
           }
         }
@@ -1322,12 +1348,22 @@ object OnnxTranslator {
     )
   }
 
-  private fun publishRetryProgress(progressKey: String, partIndex: Int, attempt: Int, maxRetries: Int) {
+  private fun publishRetryProgress(
+    progressKey: String,
+    partIndex: Int,
+    attempt: Int,
+    maxRetries: Int,
+    lowSpeed: Boolean = false
+  ) {
     downloadProgressState = downloadProgressState + mapOf(
       "status" to "downloading",
       "speedKbps" to 0.0,
       "error" to "",
-      "detail" to "分块 #$partIndex 超时，正在重试 $attempt/$maxRetries",
+      "detail" to if (lowSpeed) {
+        "尾部分块速度过低，正在切换连接 $attempt/$maxRetries"
+      } else {
+        "分块 #$partIndex 超时，正在重试 $attempt/$maxRetries"
+      },
       "targetFileName" to progressKey
     )
   }
@@ -1483,6 +1519,13 @@ private class DownloadCancelledException : java.io.IOException("用户已取消�
 private class RangeDownloadUnsupportedException(message: String) : java.io.IOException(message)
 
 /**
+ * 最后一个 Range 分片仍在滴流但速度长期过低时主动换连接。
+ * 普通 readTimeout 无法处理这种“持续有少量字节到达”的场景。
+ */
+private class RangeDownloadLowSpeedException(speedKbps: Double) :
+  java.io.IOException("尾部分片持续低速: ${String.format(java.util.Locale.US, "%.1f", speedKbps)} KB/s")
+
+/**
  * Range 分片进度聚合器：多个下载 worker 共享计数，锁内只做加法与快照，
  * 锁外发布不可变进度 Map，保证 downloadedBytes/progress/speedKbps 不会被并发覆盖成错误值。
  */
@@ -1496,6 +1539,7 @@ private class RangeProgressAggregator(
   private var windowBytes = 0L
   private var lastPublishMs = System.currentTimeMillis()
   private var smoothedSpeedKbps = 0.0
+  private var maxPublishedBytes = baseBytes
 
   fun add(partIndex: Int, delta: Long) {
     if (delta <= 0L || partIndex !in partBytes.indices) return
@@ -1518,7 +1562,8 @@ private class RangeProgressAggregator(
         }
         windowBytes = 0L
         lastPublishMs = now
-        onProgress(baseBytes + sum, totalBytes, smoothedSpeedKbps)
+        maxPublishedBytes = maxOf(maxPublishedBytes, baseBytes + sum)
+        onProgress(maxPublishedBytes, totalBytes, smoothedSpeedKbps)
       }
     }
   }
@@ -1536,7 +1581,7 @@ private class RangeProgressAggregator(
     synchronized(this) {
       var sum = 0L
       for (value in partBytes) sum += value
-      downloaded = baseBytes + sum
+      downloaded = maxOf(maxPublishedBytes, baseBytes + sum)
       speed = smoothedSpeedKbps
     }
     onProgress(downloaded, totalBytes, speed)
