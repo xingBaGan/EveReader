@@ -539,12 +539,11 @@ object OnnxTranslator {
       modelDir.mkdirs()
     }
 
-    val progressKey = if (targetFileName.equals("manifest.json", ignoreCase = true) || downloadUrl.endsWith("manifest.json", ignoreCase = true)) {
-      val segs = downloadUrl.trimEnd('/').split('/')
-      if (segs.size >= 2) segs[segs.size - 2] else targetFileName
-    } else {
-      targetFileName
-    }
+    // The JS catalog passes a stable model identifier (for example "fast-int8")
+    // as targetFileName. Keep it as the progress key even when the URL points to
+    // manifest.json; deriving the parent URL segment produced a version date such
+    // as "2026-11-04", which prevented JS from associating progress with a model.
+    val progressKey = targetFileName
 
     val tempFile = File(modelDir, "$progressKey.download")
     val finalFile = File(modelDir, targetFileName)

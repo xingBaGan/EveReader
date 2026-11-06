@@ -26,6 +26,10 @@ export interface DeviceModelStatus {
 }
 
 export class DeviceModelManager {
+  getDownloadProgress(): OnnxDownloadProgress {
+    return onnxGetDownloadProgress();
+  }
+
   async getStatus(id: DeviceTranslationModel): Promise<DeviceModelStatus> {
     const pack = getDeviceModelPack(id);
     if (!isOnnxDownloadSupported()) {

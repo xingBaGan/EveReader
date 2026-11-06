@@ -62,6 +62,9 @@ export default function ProfileScreen() {
     Partial<Record<DeviceTranslationModel, DeviceModelStatus>>
   >({});
   const [busyModel, setBusyModel] = useState<DeviceTranslationModel | null>(null);
+  const [liveDownloadProgress, setLiveDownloadProgress] = useState<
+    DeviceModelStatus['progress']
+  >();
 
   const refreshModelStatuses = useCallback(async () => {
     const entries = await Promise.all(
@@ -84,14 +87,15 @@ export default function ProfileScreen() {
     if (!busyModel) return;
     const timer = setInterval(async () => {
       await refreshModelStatuses();
-      const status = busyModel ? await deviceModelManager.getStatus(busyModel) : null;
-      if (status?.progress?.status === 'downloading') {
-        const p = status.progress;
+      const p = deviceModelManager.getDownloadProgress();
+      setLiveDownloadProgress(p);
+      if (p.status === 'downloading') {
+        const pack = DEVICE_MODEL_CATALOG.find((item) => item.id === busyModel);
         const pct = p.progress > 0 ? (p.progress * 100).toFixed(1) : '0.0';
         const spd = p.speedKbps >= 1024 ? `${(p.speedKbps / 1024).toFixed(2)} MB/s` : `${Math.round(p.speedKbps)} KB/s`;
         const dlMb = (p.downloadedBytes / (1024 * 1024)).toFixed(1);
         const totMb = (p.totalBytes / (1024 * 1024)).toFixed(1);
-        console.log(`[ModelDownload] ${status.pack.displayName}: ${pct}% (${dlMb}/${totMb} MB) @ ${spd} [${p.targetFileName}]`);
+        console.log(`[ModelDownload] ${pack?.displayName || busyModel}: ${pct}% (${dlMb}/${totMb} MB) @ ${spd} [${p.targetFileName}]`);
       }
     }, 500);
     return () => clearInterval(timer);
@@ -128,6 +132,7 @@ export default function ProfileScreen() {
   const handleInstallModel = async (id: DeviceTranslationModel) => {
     try {
       setBusyModel(id);
+      setLiveDownloadProgress(deviceModelManager.getDownloadProgress());
       await deviceModelManager.install(id);
       await refreshModelStatuses();
       Alert.alert('下载成功', '端侧模型已就绪并自动设为当前翻译模型');
@@ -136,6 +141,7 @@ export default function ProfileScreen() {
       Alert.alert('模型安装失败', error?.message || '无法安装端侧翻译模型');
     } finally {
       setBusyModel(null);
+      setLiveDownloadProgress(undefined);
     }
   };
 
@@ -193,7 +199,8 @@ export default function ProfileScreen() {
               const status = modelStatuses[pack.id];
               const isBusy = busyModel === pack.id;
               const progress = status?.progress?.progress ?? 0;
-              const downloadProgress = status?.progress;
+              const downloadProgress =
+                status?.progress ?? (busyModel === pack.id ? liveDownloadProgress : undefined);
               const isInstalled = status?.state === 'installed' || status?.state === 'active';
               const unavailable = status?.state === 'unavailable';
               const missingConfig = !pack.downloadUrl || !pack.sha256;
