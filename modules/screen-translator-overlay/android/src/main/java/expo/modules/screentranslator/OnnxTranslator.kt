@@ -6,8 +6,10 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
@@ -16,6 +18,7 @@ import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.nio.LongBuffer
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 
 /**
@@ -494,11 +497,32 @@ object OnnxTranslator {
 
   // ==================== 离线模型自主下载与文件管理模块 ====================
 
+  // 只有足够大的 manifest 文件才值得启用多连接 Range 下载：
+  // 4 路并发至少每路 2MiB，既能摊薄单连接被限速的影响，也不至于让小文件承担连接开销。
+  private const val RANGE_DOWNLOAD_MIN_BYTES = 8L * 1024L * 1024L
+  private const val RANGE_DOWNLOAD_MAX_PARTS = 4
+  private const val DOWNLOAD_PROGRESS_INTERVAL_MS = 400L
+  private const val DOWNLOAD_BUFFER_SIZE = 65536
+
   @Volatile
   private var isDownloading = false
 
   @Volatile
   private var cancelDownloadFlag = false
+
+  // 所有进行中的连接（含单连接回退、Range 分片）。cancelDownload 会主动断开它们，
+  // 避免阻塞中的 socket 读取要等到 120s readTimeout 才响应取消。
+  private val activeConnections: MutableSet<java.net.HttpURLConnection> =
+    java.util.Collections.newSetFromMap(ConcurrentHashMap<java.net.HttpURLConnection, Boolean>())
+
+  private fun abortActiveConnections() {
+    for (connection in activeConnections) {
+      try {
+        connection.disconnect()
+      } catch (_: Exception) {
+      }
+    }
+  }
 
   @Volatile
   private var downloadProgressState: Map<String, Any> = mapOf(
@@ -515,6 +539,7 @@ object OnnxTranslator {
 
   fun cancelDownload() {
     cancelDownloadFlag = true
+    abortActiveConnections()
   }
 
   /**
@@ -559,22 +584,25 @@ object OnnxTranslator {
     )
 
     var connection: java.net.HttpURLConnection? = null
+    var stagingDirToCleanup: File? = null
     try {
       if (tempFile.exists()) tempFile.delete()
 
-      connection = openConnectionWithRedirects(downloadUrl)
-      val responseCode = connection.responseCode
+      val initialConnection = openConnectionWithRedirects(downloadUrl)
+      connection = initialConnection
+      activeConnections.add(initialConnection)
+      val responseCode = initialConnection.responseCode
       if (responseCode !in 200..299) {
         throw java.io.IOException("HTTP 错误响应码: $responseCode")
       }
 
-      val contentLength = connection.contentLengthLong
+      val contentLength = initialConnection.contentLengthLong
       var downloadedBytes = 0L
       val buffer = ByteArray(32768)
       var lastUpdateTime = System.currentTimeMillis()
       var bytesSinceLastUpdate = 0L
 
-      java.io.BufferedInputStream(connection.inputStream, 65536).use { input ->
+      java.io.BufferedInputStream(initialConnection.inputStream, 65536).use { input ->
         java.io.BufferedOutputStream(FileOutputStream(tempFile), 65536).use { output ->
           var bytesRead = input.read(buffer)
           while (bytesRead != -1) {
@@ -620,6 +648,12 @@ object OnnxTranslator {
         }
       }
 
+      activeConnections.remove(initialConnection)
+      try {
+        initialConnection.disconnect()
+      } catch (_: Exception) {
+      }
+
       if (!expectedSha256.isNullOrBlank()) {
         val actualSha256 = sha256(tempFile)
         if (!actualSha256.equals(expectedSha256.trim(), ignoreCase = true)) {
@@ -638,6 +672,7 @@ object OnnxTranslator {
 
         val stagingDir = File(modelDir, ".staging-$variantName-$versionName")
         val versionDir = File(modelDir, "$variantName-$versionName")
+        stagingDirToCleanup = stagingDir
 
         if (stagingDir.exists()) stagingDir.deleteRecursively()
         stagingDir.mkdirs()
@@ -673,50 +708,26 @@ object OnnxTranslator {
           fileDest.parentFile?.mkdirs()
 
           val fileUrl = "$baseUrl/$relPath"
-          val fileConn = openConnectionWithRedirects(fileUrl)
-          if (fileConn.responseCode !in 200..299) {
+          try {
+            downloadManifestFile(
+              fileUrl = fileUrl,
+              fileDest = fileDest,
+              expectedFileBytes = expectedFileBytes,
+              completedBytes = completedBytes,
+              totalExpectedBytes = totalExpectedBytes,
+              progressKey = progressKey
+            )
+          } catch (e: DownloadCancelledException) {
             stagingDir.deleteRecursively()
             tempFile.delete()
-            throw java.io.IOException("下载分块文件失败 $relPath (HTTP ${fileConn.responseCode})")
+            publishCancelledProgress(targetFileName)
+            return@withContext false
           }
 
-          java.io.BufferedInputStream(fileConn.inputStream, 65536).use { inStream ->
-            java.io.BufferedOutputStream(FileOutputStream(fileDest), 65536).use { outStream ->
-              val chunkBuf = ByteArray(65536)
-              var r = inStream.read(chunkBuf)
-              var lastUpd = System.currentTimeMillis()
-              var bytesDelta = 0L
-
-              while (r != -1) {
-                if (cancelDownloadFlag) {
-                  stagingDir.deleteRecursively()
-                  tempFile.delete()
-                  return@withContext false
-                }
-                outStream.write(chunkBuf, 0, r)
-                completedBytes += r
-                bytesDelta += r
-
-                val now = System.currentTimeMillis()
-                val diff = now - lastUpd
-                if (diff >= 400) {
-                  val spd = if (diff > 0) (bytesDelta / 1024.0) / (diff / 1000.0) else 0.0
-                  val prog = if (totalExpectedBytes > 0) min(1.0, completedBytes.toDouble() / totalExpectedBytes) else -1.0
-                  downloadProgressState = mapOf(
-                    "status" to "downloading",
-                    "progress" to prog,
-                    "downloadedBytes" to completedBytes,
-                    "totalBytes" to totalExpectedBytes,
-                    "speedKbps" to spd,
-                    "error" to "",
-                    "targetFileName" to progressKey
-                  )
-                  lastUpd = now
-                  bytesDelta = 0L
-                }
-                r = inStream.read(chunkBuf)
-              }
-            }
+          if (expectedFileBytes > 0 && fileDest.length() != expectedFileBytes) {
+            stagingDir.deleteRecursively()
+            tempFile.delete()
+            throw java.io.IOException("文件大小与清单不符: $relPath (${fileDest.length()} / $expectedFileBytes)")
           }
 
           // 严格校验每个下载文件的 SHA-256
@@ -726,6 +737,14 @@ object OnnxTranslator {
             tempFile.delete()
             throw java.io.IOException("文件校验失败: $relPath (SHA-256 不匹配)")
           }
+          completedBytes += fileDest.length()
+        }
+
+        if (cancelDownloadFlag) {
+          stagingDir.deleteRecursively()
+          tempFile.delete()
+          publishCancelledProgress(targetFileName)
+          return@withContext false
         }
 
         // 验证完成，原子切换版本目录
@@ -774,6 +793,7 @@ object OnnxTranslator {
         val versionName = targetFileName.removeSuffix(".zip").removeSuffix(".ZIP")
         val stagingDir = File(modelDir, ".staging-$versionName")
         val versionDir = File(modelDir, versionName)
+        stagingDirToCleanup = stagingDir
 
         if (stagingDir.exists()) stagingDir.deleteRecursively()
         stagingDir.mkdirs()
@@ -836,22 +856,381 @@ object OnnxTranslator {
       Log.i(TAG, "模型下载并部署就绪: $targetFileName (状态: $statusMessage)")
       true
     } catch (e: Exception) {
-      Log.e(TAG, "下载离线模型失败: ${e.message}", e)
       tempFile.delete()
-      downloadProgressState = mapOf(
-        "status" to "error",
-        "progress" to 0.0,
-        "downloadedBytes" to 0L,
-        "totalBytes" to 0L,
-        "speedKbps" to 0.0,
-        "error" to (e.message ?: "下载离线模型异常"),
-        "targetFileName" to targetFileName
-      )
+      stagingDirToCleanup?.deleteRecursively()
+      if (cancelDownloadFlag) {
+        Log.i(TAG, "模型下载已被用户取消")
+        publishCancelledProgress(targetFileName)
+      } else {
+        Log.e(TAG, "下载离线模型失败: ${e.message}", e)
+        downloadProgressState = mapOf(
+          "status" to "error",
+          "progress" to 0.0,
+          "downloadedBytes" to 0L,
+          "totalBytes" to 0L,
+          "speedKbps" to 0.0,
+          "error" to (e.message ?: "下载离线模型异常"),
+          "targetFileName" to targetFileName
+        )
+      }
       false
     } finally {
-      connection?.disconnect()
+      connection?.let { conn ->
+        activeConnections.remove(conn)
+        try {
+          conn.disconnect()
+        } catch (_: Exception) {
+        }
+      }
       isDownloading = false
     }
+  }
+
+  /**
+   * 下载 manifest 中的单个文件：足够大的文件优先走 4 路 Range 并发，
+   * 任何 Range 相关异常都会清理分片后回退到原有单连接下载；取消异常则直接向上抛出。
+   */
+  private suspend fun downloadManifestFile(
+    fileUrl: String,
+    fileDest: File,
+    expectedFileBytes: Long,
+    completedBytes: Long,
+    totalExpectedBytes: Long,
+    progressKey: String
+  ) {
+    if (expectedFileBytes >= RANGE_DOWNLOAD_MIN_BYTES) {
+      try {
+        downloadFileRanged(
+          fileUrl = fileUrl,
+          fileDest = fileDest,
+          expectedFileBytes = expectedFileBytes,
+          completedBytes = completedBytes,
+          totalExpectedBytes = totalExpectedBytes,
+          progressKey = progressKey
+        )
+        return
+      } catch (e: DownloadCancelledException) {
+        fileDest.delete()
+        throw e
+      } catch (e: CancellationException) {
+        fileDest.delete()
+        throw e
+      } catch (e: Exception) {
+        fileDest.delete()
+        if (cancelDownloadFlag) throw DownloadCancelledException()
+        Log.w(TAG, "Range 并发下载不可用，安全清理后回退单连接: ${e.message}")
+        publishDownloadProgress(
+          status = "downloading",
+          progress = if (totalExpectedBytes > 0) min(1.0, completedBytes.toDouble() / totalExpectedBytes) else -1.0,
+          downloadedBytes = completedBytes,
+          totalBytes = totalExpectedBytes,
+          speedKbps = 0.0,
+          progressKey = progressKey
+        )
+      }
+    }
+
+    try {
+      downloadFileSingle(
+        fileUrl = fileUrl,
+        fileDest = fileDest,
+        completedBytes = completedBytes,
+        totalExpectedBytes = totalExpectedBytes,
+        progressKey = progressKey
+      )
+    } catch (e: DownloadCancelledException) {
+      fileDest.delete()
+      throw e
+    } catch (e: CancellationException) {
+      fileDest.delete()
+      throw e
+    } catch (e: Exception) {
+      fileDest.delete()
+      if (cancelDownloadFlag) throw DownloadCancelledException()
+      throw e
+    }
+  }
+
+  /**
+   * 原有的单连接流式下载路径，作为小文件与 Range 失败时的安全回退。
+   */
+  private fun downloadFileSingle(
+    fileUrl: String,
+    fileDest: File,
+    completedBytes: Long,
+    totalExpectedBytes: Long,
+    progressKey: String
+  ) {
+    val connection = openConnectionWithRedirects(fileUrl)
+    activeConnections.add(connection)
+    try {
+      val responseCode = connection.responseCode
+      if (responseCode !in 200..299) {
+        throw java.io.IOException("下载分块文件失败 $fileUrl (HTTP $responseCode)")
+      }
+
+      if (fileDest.exists()) fileDest.delete()
+
+      var downloadedBytes = 0L
+      var lastUpdateTime = System.currentTimeMillis()
+      var bytesSinceLastUpdate = 0L
+      val buffer = ByteArray(32768)
+
+      java.io.BufferedInputStream(connection.inputStream, DOWNLOAD_BUFFER_SIZE).use { input ->
+        java.io.BufferedOutputStream(FileOutputStream(fileDest), DOWNLOAD_BUFFER_SIZE).use { output ->
+          while (true) {
+            if (cancelDownloadFlag) throw DownloadCancelledException()
+            val bytesRead = input.read(buffer)
+            if (bytesRead == -1) break
+
+            output.write(buffer, 0, bytesRead)
+            downloadedBytes += bytesRead
+            bytesSinceLastUpdate += bytesRead
+
+            val now = System.currentTimeMillis()
+            val timeDiff = now - lastUpdateTime
+            if (timeDiff >= DOWNLOAD_PROGRESS_INTERVAL_MS) {
+              val speedKbps = (bytesSinceLastUpdate / 1024.0) / (timeDiff / 1000.0)
+              publishDownloadProgress(
+                status = "downloading",
+                progress = if (totalExpectedBytes > 0) min(1.0, (completedBytes + downloadedBytes).toDouble() / totalExpectedBytes) else -1.0,
+                downloadedBytes = completedBytes + downloadedBytes,
+                totalBytes = totalExpectedBytes,
+                speedKbps = speedKbps,
+                progressKey = progressKey
+              )
+              lastUpdateTime = now
+              bytesSinceLastUpdate = 0L
+            }
+          }
+        }
+      }
+    } finally {
+      activeConnections.remove(connection)
+      try {
+        connection.disconnect()
+      } catch (_: Exception) {
+      }
+    }
+  }
+
+  /**
+   * 4 路 Range 并发下载：每片写入独立临时文件，全部完成后再按顺序流式合并。
+   * 服务器不支持（非 206 / Content-Range 不匹配）或任一分片失败时抛出异常，由调用方回退。
+   */
+  private suspend fun downloadFileRanged(
+    fileUrl: String,
+    fileDest: File,
+    expectedFileBytes: Long,
+    completedBytes: Long,
+    totalExpectedBytes: Long,
+    progressKey: String
+  ) {
+    val partCount = RANGE_DOWNLOAD_MAX_PARTS
+    val partSize = (expectedFileBytes + partCount - 1) / partCount
+    val tempDir = File(fileDest.parentFile, ".rangedl-${fileDest.name}-${System.nanoTime()}")
+    if (!tempDir.mkdirs() && !tempDir.isDirectory) {
+      throw java.io.IOException("无法创建 Range 临时目录: ${tempDir.absolutePath}")
+    }
+    Log.i(TAG, "模型分片 Range 并发下载: ${fileDest.name} ($expectedFileBytes bytes, $partCount 路)")
+
+    try {
+      val abortFlag = AtomicBoolean(false)
+      val aggregator = RangeProgressAggregator(
+        baseBytes = completedBytes,
+        totalBytes = totalExpectedBytes,
+        partCount = partCount
+      ) { downloaded, total, speedKbps ->
+        publishDownloadProgress(
+          status = "downloading",
+          progress = if (total > 0) min(1.0, downloaded.toDouble() / total) else -1.0,
+          downloadedBytes = downloaded,
+          totalBytes = total,
+          speedKbps = speedKbps,
+          progressKey = progressKey
+        )
+      }
+
+      coroutineScope {
+        (0 until partCount).map { index ->
+          val start = index.toLong() * partSize
+          val end = min((index + 1).toLong() * partSize - 1, expectedFileBytes - 1)
+          async(Dispatchers.IO) {
+            downloadRangePart(
+              url = fileUrl,
+              partFile = File(tempDir, "part$index.tmp"),
+              start = start,
+              end = end,
+              totalFileBytes = expectedFileBytes,
+              partIndex = index,
+              aggregator = aggregator,
+              abortFlag = abortFlag
+            )
+          }
+        }.awaitAll()
+      }
+
+      if (cancelDownloadFlag) throw DownloadCancelledException()
+
+      // 顺序流式合并，任意时刻内存中只有一个缓冲区，不装载整个模型文件
+      if (fileDest.exists()) fileDest.delete()
+      java.io.BufferedOutputStream(FileOutputStream(fileDest), DOWNLOAD_BUFFER_SIZE).use { output ->
+        for (index in 0 until partCount) {
+          val partFile = File(tempDir, "part$index.tmp")
+          if (!partFile.isFile) {
+            throw java.io.IOException("Range 分片缺失: ${partFile.name}")
+          }
+          java.io.BufferedInputStream(partFile.inputStream(), DOWNLOAD_BUFFER_SIZE).use { input ->
+            val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+            while (true) {
+              if (cancelDownloadFlag) throw DownloadCancelledException()
+              val bytesRead = input.read(buffer)
+              if (bytesRead == -1) break
+              output.write(buffer, 0, bytesRead)
+            }
+          }
+        }
+      }
+
+      val mergedLength = fileDest.length()
+      if (mergedLength != expectedFileBytes) {
+        throw java.io.IOException("合并后的文件大小不符: $mergedLength / $expectedFileBytes")
+      }
+      aggregator.finish()
+    } finally {
+      tempDir.deleteRecursively()
+    }
+  }
+
+  /**
+   * 下载单个 Range 分片，严格校验 206、Content-Range 与分片字节数。
+   */
+  private fun downloadRangePart(
+    url: String,
+    partFile: File,
+    start: Long,
+    end: Long,
+    totalFileBytes: Long,
+    partIndex: Int,
+    aggregator: RangeProgressAggregator,
+    abortFlag: AtomicBoolean
+  ) {
+    val expectedLength = end - start + 1
+    if (start < 0L || end < start) {
+      throw RangeDownloadUnsupportedException("非法 Range 区间: $start-$end")
+    }
+    if (cancelDownloadFlag) throw DownloadCancelledException()
+    if (abortFlag.get()) throw java.io.IOException("Range 分片下载已中止")
+
+    val connection = openConnectionWithRedirects(
+      initialUrl = url,
+      extraHeaders = mapOf("Range" to "bytes=$start-$end")
+    )
+    activeConnections.add(connection)
+    try {
+      if (abortFlag.get()) throw java.io.IOException("Range 分片下载已中止")
+      if (cancelDownloadFlag) throw DownloadCancelledException()
+
+      val responseCode = connection.responseCode
+      if (cancelDownloadFlag) throw DownloadCancelledException()
+      if (responseCode != 206) {
+        throw RangeDownloadUnsupportedException("服务器未返回 206 Partial Content (HTTP $responseCode)")
+      }
+
+      val contentRange = connection.getHeaderField("Content-Range")
+      val parsedRange = parseContentRange(contentRange)
+        ?: throw RangeDownloadUnsupportedException("缺失或非法 Content-Range: $contentRange")
+      if (parsedRange.first != start || parsedRange.second != end) {
+        throw RangeDownloadUnsupportedException("Content-Range 区间不匹配: $contentRange，期望 $start-$end")
+      }
+      if (parsedRange.third != totalFileBytes) {
+        throw RangeDownloadUnsupportedException("Content-Range 总大小不匹配: $contentRange，期望 $totalFileBytes")
+      }
+
+      val headerLength = connection.contentLengthLong
+      if (headerLength >= 0L && headerLength != expectedLength) {
+        throw RangeDownloadUnsupportedException("Content-Length 与分片大小不符: $headerLength / $expectedLength")
+      }
+
+      var written = 0L
+      java.io.BufferedInputStream(connection.inputStream, DOWNLOAD_BUFFER_SIZE).use { input ->
+        java.io.BufferedOutputStream(FileOutputStream(partFile), DOWNLOAD_BUFFER_SIZE).use { output ->
+          val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+          while (true) {
+            if (cancelDownloadFlag) throw DownloadCancelledException()
+            if (abortFlag.get()) throw java.io.IOException("Range 分片下载已中止")
+
+            val bytesRead = input.read(buffer)
+            if (bytesRead == -1) break
+            written += bytesRead
+            if (written > expectedLength) {
+              throw RangeDownloadUnsupportedException("分片响应超出请求范围: $start-$end")
+            }
+            output.write(buffer, 0, bytesRead)
+            aggregator.add(partIndex, bytesRead.toLong())
+          }
+        }
+      }
+
+      if (written != expectedLength) {
+        throw java.io.IOException("Range 分片不完整: $written / $expectedLength")
+      }
+    } catch (e: Exception) {
+      // 一个分片失败时立刻中断其余分片，避免继续消耗流量
+      if (e !is DownloadCancelledException && !cancelDownloadFlag) {
+        abortFlag.set(true)
+        abortActiveConnections()
+      }
+      throw e
+    } finally {
+      activeConnections.remove(connection)
+      try {
+        connection.disconnect()
+      } catch (_: Exception) {
+      }
+    }
+  }
+
+  private fun parseContentRange(header: String?): Triple<Long, Long, Long>? {
+    if (header.isNullOrBlank()) return null
+    val match = Regex("""^\s*bytes\s+(\d+)-(\d+)/(\d+)\s*$""", RegexOption.IGNORE_CASE)
+      .find(header)
+      ?: return null
+    val start = match.groupValues[1].toLongOrNull() ?: return null
+    val end = match.groupValues[2].toLongOrNull() ?: return null
+    val total = match.groupValues[3].toLongOrNull() ?: return null
+    return Triple(start, end, total)
+  }
+
+  private fun publishDownloadProgress(
+    status: String,
+    progress: Double,
+    downloadedBytes: Long,
+    totalBytes: Long,
+    speedKbps: Double,
+    progressKey: String
+  ) {
+    downloadProgressState = mapOf(
+      "status" to status,
+      "progress" to progress,
+      "downloadedBytes" to downloadedBytes,
+      "totalBytes" to totalBytes,
+      "speedKbps" to speedKbps,
+      "error" to "",
+      "targetFileName" to progressKey
+    )
+  }
+
+  private fun publishCancelledProgress(progressKey: String) {
+    downloadProgressState = mapOf(
+      "status" to "cancelled",
+      "progress" to 0.0,
+      "downloadedBytes" to 0L,
+      "totalBytes" to 0L,
+      "speedKbps" to 0.0,
+      "error" to "用户已取消下载",
+      "targetFileName" to progressKey
+    )
   }
 
   private fun sha256(file: File): String {
@@ -867,7 +1246,11 @@ object OnnxTranslator {
     return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
   }
 
-  private fun openConnectionWithRedirects(initialUrl: String, maxRedirects: Int = 6): java.net.HttpURLConnection {
+  private fun openConnectionWithRedirects(
+    initialUrl: String,
+    maxRedirects: Int = 6,
+    extraHeaders: Map<String, String> = emptyMap()
+  ): java.net.HttpURLConnection {
     var url = initialUrl
     var redirects = 0
     while (redirects < maxRedirects) {
@@ -880,6 +1263,10 @@ object OnnxTranslator {
       conn.setRequestProperty("Accept-Encoding", "identity")
       conn.setRequestProperty("Connection", "keep-alive")
       conn.setRequestProperty("Accept", "*/*")
+      // 重定向的每一跳都必须带上额外请求头（例如 Range），否则最终响应会退化为 200
+      for ((name, value) in extraHeaders) {
+        conn.setRequestProperty(name, value)
+      }
       conn.connect()
       val code = conn.responseCode
       if (code in 300..399) {
@@ -983,5 +1370,69 @@ object OnnxTranslator {
     val group = min(digitGroups, units.size - 1)
     val size = bytes / Math.pow(1024.0, group.toDouble())
     return String.format(java.util.Locale.US, "%.1f %s", size, units[group])
+  }
+}
+
+/**
+ * 用户主动取消时抛出的独立异常，调用方据此跳过“回退单连接”逻辑并直接清理。
+ */
+private class DownloadCancelledException : java.io.IOException("用户已取消下载")
+
+/**
+ * 服务器不支持 Range、206 或 Content-Range 不符合预期时抛出。
+ */
+private class RangeDownloadUnsupportedException(message: String) : java.io.IOException(message)
+
+/**
+ * Range 分片进度聚合器：4 个下载线程共享计数，锁内只做加法与快照，
+ * 锁外发布不可变进度 Map，保证 downloadedBytes/progress/speedKbps 不会被并发覆盖成错误值。
+ */
+private class RangeProgressAggregator(
+  private val baseBytes: Long,
+  private val totalBytes: Long,
+  partCount: Int,
+  private val onProgress: (downloadedBytes: Long, totalBytes: Long, speedKbps: Double) -> Unit
+) {
+  private val partBytes = LongArray(partCount)
+  private var windowBytes = 0L
+  private var lastPublishMs = System.currentTimeMillis()
+  private var smoothedSpeedKbps = 0.0
+
+  fun add(partIndex: Int, delta: Long) {
+    if (delta <= 0L || partIndex !in partBytes.indices) return
+
+    // 在锁内发布快照，保证 4 个线程的进度不会以旧值覆盖新值
+    synchronized(this) {
+      partBytes[partIndex] += delta
+      windowBytes += delta
+
+      val now = System.currentTimeMillis()
+      val elapsed = now - lastPublishMs
+      if (elapsed >= 400L) {
+        var sum = 0L
+        for (value in partBytes) sum += value
+        val instantaneous = (windowBytes / 1024.0) / (elapsed / 1000.0)
+        smoothedSpeedKbps = if (smoothedSpeedKbps <= 0.0) {
+          instantaneous
+        } else {
+          smoothedSpeedKbps * 0.6 + instantaneous * 0.4
+        }
+        windowBytes = 0L
+        lastPublishMs = now
+        onProgress(baseBytes + sum, totalBytes, smoothedSpeedKbps)
+      }
+    }
+  }
+
+  fun finish() {
+    val downloaded: Long
+    val speed: Double
+    synchronized(this) {
+      var sum = 0L
+      for (value in partBytes) sum += value
+      downloaded = baseBytes + sum
+      speed = smoothedSpeedKbps
+    }
+    onProgress(downloaded, totalBytes, speed)
   }
 }
