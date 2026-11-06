@@ -24,6 +24,8 @@ import {
   Cpu,
   HardDrive,
   Trash2,
+  Pause,
+  Play,
 } from 'lucide-react-native';
 import {
   DEVICE_MODEL_CATALOG,
@@ -181,6 +183,15 @@ export default function ProfileScreen() {
     }
   };
 
+  const handleToggleDownloadPause = () => {
+    if (liveDownloadProgress?.status === 'paused') {
+      deviceModelManager.resumeInstall();
+    } else {
+      deviceModelManager.pauseInstall();
+    }
+    setLiveDownloadProgress(deviceModelManager.getDownloadProgress());
+  };
+
   const handleRemoveModel = (id: DeviceTranslationModel) => {
     const pack = DEVICE_MODEL_CATALOG.find((item) => item.id === id);
     Alert.alert('删除模型包', `确认删除「${pack?.displayName || id}」并释放存储空间？`, [
@@ -319,6 +330,18 @@ export default function ProfileScreen() {
                     {isInstalled ? (
                       <Pressable style={styles.modelDeleteButton} onPress={() => handleRemoveModel(pack.id)}>
                         <Trash2 size={15} color="#f87171" />
+                      </Pressable>
+                    ) : null}
+                    {isBusy && downloadProgress?.status !== 'extracting' ? (
+                      <Pressable style={styles.modelPauseButton} onPress={handleToggleDownloadPause}>
+                        {downloadProgress?.status === 'paused' ? (
+                          <Play size={15} color="#fbbf24" />
+                        ) : (
+                          <Pause size={15} color="#fbbf24" />
+                        )}
+                        <Text style={styles.modelPauseButtonText}>
+                          {downloadProgress?.status === 'paused' ? '继续' : '暂停'}
+                        </Text>
                       </Pressable>
                     ) : null}
                   </View>
@@ -650,6 +673,23 @@ const styles = StyleSheet.create({
   },
   modelActiveButtonText: {
     color: '#6ee7b7',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  modelPauseButton: {
+    height: 34,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#92400e',
+    backgroundColor: '#451a03',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+  },
+  modelPauseButtonText: {
+    color: '#fbbf24',
     fontSize: 11,
     fontWeight: '700',
   },

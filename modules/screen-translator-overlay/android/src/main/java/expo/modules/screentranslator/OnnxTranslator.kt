@@ -541,6 +541,9 @@ object OnnxTranslator {
   @Volatile
   private var cancelDownloadFlag = false
 
+  @Volatile
+  private var pauseDownloadFlag = false
+
   // 所有进行中的连接（含单连接回退、Range 分片）。cancelDownload 会主动断开它们，
   // 避免阻塞中的 socket 读取要等到 120s readTimeout 才响应取消。
   private val activeConnections: MutableSet<java.net.HttpURLConnection> =
@@ -575,7 +578,31 @@ object OnnxTranslator {
 
   fun cancelDownload() {
     cancelDownloadFlag = true
+    pauseDownloadFlag = false
     abortActiveConnections()
+  }
+
+  fun pauseDownload() {
+    if (!isDownloading || pauseDownloadFlag) return
+    pauseDownloadFlag = true
+    downloadProgressState = downloadProgressState + mapOf(
+      "status" to "paused",
+      "speedKbps" to 0.0,
+      "detail" to "下载已暂停",
+      "error" to ""
+    )
+    abortActiveConnections()
+  }
+
+  fun resumeDownload() {
+    if (!isDownloading || !pauseDownloadFlag) return
+    pauseDownloadFlag = false
+    downloadProgressState = downloadProgressState + mapOf(
+      "status" to "downloading",
+      "speedKbps" to 0.0,
+      "detail" to "正在恢复未完成分块",
+      "error" to ""
+    )
   }
 
   /**
@@ -595,6 +622,7 @@ object OnnxTranslator {
 
     isDownloading = true
     cancelDownloadFlag = false
+    pauseDownloadFlag = false
     val modelDir = File(context.filesDir, "models/translation")
     if (!modelDir.exists()) {
       modelDir.mkdirs()
@@ -1123,6 +1151,14 @@ object OnnxTranslator {
                 } catch (e: Exception) {
                   partFile.delete()
                   aggregator.resetPart(index)
+                  if (pauseDownloadFlag) {
+                    publishPausedProgress(progressKey)
+                    while (pauseDownloadFlag && !cancelDownloadFlag) {
+                      delay(250L)
+                    }
+                    if (cancelDownloadFlag) throw DownloadCancelledException()
+                    continue
+                  }
                   attempt++
                   if (attempt > RANGE_DOWNLOAD_MAX_RETRIES) throw e
                   publishRetryProgress(
@@ -1344,6 +1380,16 @@ object OnnxTranslator {
       "totalBytes" to 0L,
       "speedKbps" to 0.0,
       "error" to "用户已取消下载",
+      "targetFileName" to progressKey
+    )
+  }
+
+  private fun publishPausedProgress(progressKey: String) {
+    downloadProgressState = downloadProgressState + mapOf(
+      "status" to "paused",
+      "speedKbps" to 0.0,
+      "error" to "",
+      "detail" to "下载已暂停，已完成分块将被保留",
       "targetFileName" to progressKey
     )
   }

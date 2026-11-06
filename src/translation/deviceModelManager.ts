@@ -7,6 +7,8 @@ import {
   onnxGetActiveModel,
   onnxGetDownloadProgress,
   onnxListModelFiles,
+  onnxPauseDownload,
+  onnxResumeDownload,
   onnxSetActiveModel,
   type InstalledModelFile,
   type OnnxDownloadProgress,
@@ -40,7 +42,7 @@ export class DeviceModelManager {
     const installed = files.some((file) => file.name === pack.activeModelFileName);
     const progress = onnxGetDownloadProgress();
     const installing =
-      (progress.status === 'downloading' || progress.status === 'extracting') &&
+      (progress.status === 'downloading' || progress.status === 'paused' || progress.status === 'extracting') &&
       (progress.targetFileName === pack.archiveFileName ||
         progress.targetFileName.includes(pack.filePrefix) ||
         pack.archiveFileName.includes(progress.targetFileName) ||
@@ -96,6 +98,14 @@ export class DeviceModelManager {
 
   cancelInstall(): void {
     onnxCancelDownload();
+  }
+
+  pauseInstall(): void {
+    onnxPauseDownload();
+  }
+
+  resumeInstall(): void {
+    onnxResumeDownload();
   }
 
   async activate(id: DeviceTranslationModel): Promise<boolean> {

@@ -907,7 +907,7 @@ export async function onnxTranslateBatch(
 }
 
 export interface OnnxDownloadProgress {
-  status: 'idle' | 'downloading' | 'extracting' | 'completed' | 'error' | 'cancelled';
+  status: 'idle' | 'downloading' | 'paused' | 'extracting' | 'completed' | 'error' | 'cancelled';
   progress: number; // 0.0 ~ 1.0, 若未知则为 -1
   downloadedBytes: number;
   totalBytes: number;
@@ -988,6 +988,22 @@ export function onnxCancelDownload(): void {
   if (NativeModule && typeof NativeModule.onnxCancelDownload === 'function') {
     try {
       NativeModule.onnxCancelDownload();
+    } catch {}
+  }
+}
+
+export function onnxPauseDownload(): void {
+  if (NativeModule && typeof NativeModule.onnxPauseDownload === 'function') {
+    try {
+      NativeModule.onnxPauseDownload();
+    } catch {}
+  }
+}
+
+export function onnxResumeDownload(): void {
+  if (NativeModule && typeof NativeModule.onnxResumeDownload === 'function') {
+    try {
+      NativeModule.onnxResumeDownload();
     } catch {}
   }
 }

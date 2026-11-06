@@ -739,6 +739,14 @@ class ScreenTranslatorOverlayModule : Module() {
       OnnxTranslator.cancelDownload()
     }
 
+    Function("onnxPauseDownload") {
+      OnnxTranslator.pauseDownload()
+    }
+
+    Function("onnxResumeDownload") {
+      OnnxTranslator.resumeDownload()
+    }
+
     AsyncFunction("onnxDeleteModelFile") { fileName: String?, promise: Promise ->
       val context = appContext.reactContext
       if (context == null) {
