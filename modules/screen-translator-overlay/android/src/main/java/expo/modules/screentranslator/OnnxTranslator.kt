@@ -12,12 +12,16 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.nio.LongBuffer
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 
@@ -504,6 +508,17 @@ object OnnxTranslator {
   private const val DOWNLOAD_PROGRESS_INTERVAL_MS = 400L
   private const val DOWNLOAD_BUFFER_SIZE = 65536
 
+  private val downloadHttpClient: OkHttpClient by lazy {
+    OkHttpClient.Builder()
+      .connectTimeout(30, TimeUnit.SECONDS)
+      .readTimeout(120, TimeUnit.SECONDS)
+      .callTimeout(0, TimeUnit.MILLISECONDS)
+      .followRedirects(true)
+      .followSslRedirects(true)
+      .retryOnConnectionFailure(true)
+      .build()
+  }
+
   @Volatile
   private var isDownloading = false
 
@@ -514,8 +529,13 @@ object OnnxTranslator {
   // 避免阻塞中的 socket 读取要等到 120s readTimeout 才响应取消。
   private val activeConnections: MutableSet<java.net.HttpURLConnection> =
     java.util.Collections.newSetFromMap(ConcurrentHashMap<java.net.HttpURLConnection, Boolean>())
+  private val activeCalls: MutableSet<Call> =
+    java.util.Collections.newSetFromMap(ConcurrentHashMap<Call, Boolean>())
 
   private fun abortActiveConnections() {
+    for (call in activeCalls) {
+      call.cancel()
+    }
     for (connection in activeConnections) {
       try {
         connection.disconnect()
@@ -961,56 +981,54 @@ object OnnxTranslator {
     totalExpectedBytes: Long,
     progressKey: String
   ) {
-    val connection = openConnectionWithRedirects(fileUrl)
-    activeConnections.add(connection)
+    val call = newDownloadCall(fileUrl)
+    activeCalls.add(call)
     try {
-      val responseCode = connection.responseCode
-      if (responseCode !in 200..299) {
-        throw java.io.IOException("下载分块文件失败 $fileUrl (HTTP $responseCode)")
-      }
+      call.execute().use { response ->
+        if (!response.isSuccessful) {
+          throw java.io.IOException("下载分块文件失败 $fileUrl (HTTP ${response.code})")
+        }
+        val body = response.body ?: throw java.io.IOException("下载响应为空: $fileUrl")
+        Log.i(TAG, "OkHttp 下载 ${fileDest.name}: ${response.protocol}")
 
-      if (fileDest.exists()) fileDest.delete()
+        if (fileDest.exists()) fileDest.delete()
+        var downloadedBytes = 0L
+        var lastUpdateTime = System.currentTimeMillis()
+        var bytesSinceLastUpdate = 0L
+        val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
 
-      var downloadedBytes = 0L
-      var lastUpdateTime = System.currentTimeMillis()
-      var bytesSinceLastUpdate = 0L
-      val buffer = ByteArray(32768)
+        java.io.BufferedInputStream(body.byteStream(), DOWNLOAD_BUFFER_SIZE).use { input ->
+          java.io.BufferedOutputStream(FileOutputStream(fileDest), DOWNLOAD_BUFFER_SIZE).use { output ->
+            while (true) {
+              if (cancelDownloadFlag) throw DownloadCancelledException()
+              val bytesRead = input.read(buffer)
+              if (bytesRead == -1) break
 
-      java.io.BufferedInputStream(connection.inputStream, DOWNLOAD_BUFFER_SIZE).use { input ->
-        java.io.BufferedOutputStream(FileOutputStream(fileDest), DOWNLOAD_BUFFER_SIZE).use { output ->
-          while (true) {
-            if (cancelDownloadFlag) throw DownloadCancelledException()
-            val bytesRead = input.read(buffer)
-            if (bytesRead == -1) break
+              output.write(buffer, 0, bytesRead)
+              downloadedBytes += bytesRead
+              bytesSinceLastUpdate += bytesRead
 
-            output.write(buffer, 0, bytesRead)
-            downloadedBytes += bytesRead
-            bytesSinceLastUpdate += bytesRead
-
-            val now = System.currentTimeMillis()
-            val timeDiff = now - lastUpdateTime
-            if (timeDiff >= DOWNLOAD_PROGRESS_INTERVAL_MS) {
-              val speedKbps = (bytesSinceLastUpdate / 1024.0) / (timeDiff / 1000.0)
-              publishDownloadProgress(
-                status = "downloading",
-                progress = if (totalExpectedBytes > 0) min(1.0, (completedBytes + downloadedBytes).toDouble() / totalExpectedBytes) else -1.0,
-                downloadedBytes = completedBytes + downloadedBytes,
-                totalBytes = totalExpectedBytes,
-                speedKbps = speedKbps,
-                progressKey = progressKey
-              )
-              lastUpdateTime = now
-              bytesSinceLastUpdate = 0L
+              val now = System.currentTimeMillis()
+              val timeDiff = now - lastUpdateTime
+              if (timeDiff >= DOWNLOAD_PROGRESS_INTERVAL_MS) {
+                val speedKbps = (bytesSinceLastUpdate / 1024.0) / (timeDiff / 1000.0)
+                publishDownloadProgress(
+                  status = "downloading",
+                  progress = if (totalExpectedBytes > 0) min(1.0, (completedBytes + downloadedBytes).toDouble() / totalExpectedBytes) else -1.0,
+                  downloadedBytes = completedBytes + downloadedBytes,
+                  totalBytes = totalExpectedBytes,
+                  speedKbps = speedKbps,
+                  progressKey = progressKey
+                )
+                lastUpdateTime = now
+                bytesSinceLastUpdate = 0L
+              }
             }
           }
         }
       }
     } finally {
-      activeConnections.remove(connection)
-      try {
-        connection.disconnect()
-      } catch (_: Exception) {
-      }
+      activeCalls.remove(call)
     }
   }
 
@@ -1122,58 +1140,57 @@ object OnnxTranslator {
     if (cancelDownloadFlag) throw DownloadCancelledException()
     if (abortFlag.get()) throw java.io.IOException("Range 分片下载已中止")
 
-    val connection = openConnectionWithRedirects(
-      initialUrl = url,
-      extraHeaders = mapOf("Range" to "bytes=$start-$end")
-    )
-    activeConnections.add(connection)
+    val call = newDownloadCall(url, mapOf("Range" to "bytes=$start-$end"))
+    activeCalls.add(call)
     try {
       if (abortFlag.get()) throw java.io.IOException("Range 分片下载已中止")
       if (cancelDownloadFlag) throw DownloadCancelledException()
 
-      val responseCode = connection.responseCode
-      if (cancelDownloadFlag) throw DownloadCancelledException()
-      if (responseCode != 206) {
-        throw RangeDownloadUnsupportedException("服务器未返回 206 Partial Content (HTTP $responseCode)")
-      }
+      call.execute().use { response ->
+        if (cancelDownloadFlag) throw DownloadCancelledException()
+        if (response.code != 206) {
+          throw RangeDownloadUnsupportedException("服务器未返回 206 Partial Content (HTTP ${response.code})")
+        }
 
-      val contentRange = connection.getHeaderField("Content-Range")
-      val parsedRange = parseContentRange(contentRange)
-        ?: throw RangeDownloadUnsupportedException("缺失或非法 Content-Range: $contentRange")
-      if (parsedRange.first != start || parsedRange.second != end) {
-        throw RangeDownloadUnsupportedException("Content-Range 区间不匹配: $contentRange，期望 $start-$end")
-      }
-      if (parsedRange.third != totalFileBytes) {
-        throw RangeDownloadUnsupportedException("Content-Range 总大小不匹配: $contentRange，期望 $totalFileBytes")
-      }
+        val contentRange = response.header("Content-Range")
+        val parsedRange = parseContentRange(contentRange)
+          ?: throw RangeDownloadUnsupportedException("缺失或非法 Content-Range: $contentRange")
+        if (parsedRange.first != start || parsedRange.second != end) {
+          throw RangeDownloadUnsupportedException("Content-Range 区间不匹配: $contentRange，期望 $start-$end")
+        }
+        if (parsedRange.third != totalFileBytes) {
+          throw RangeDownloadUnsupportedException("Content-Range 总大小不匹配: $contentRange，期望 $totalFileBytes")
+        }
 
-      val headerLength = connection.contentLengthLong
-      if (headerLength >= 0L && headerLength != expectedLength) {
-        throw RangeDownloadUnsupportedException("Content-Length 与分片大小不符: $headerLength / $expectedLength")
-      }
+        val body = response.body ?: throw java.io.IOException("Range 响应为空: $start-$end")
+        val headerLength = body.contentLength()
+        if (headerLength >= 0L && headerLength != expectedLength) {
+          throw RangeDownloadUnsupportedException("Content-Length 与分片大小不符: $headerLength / $expectedLength")
+        }
+        if (partIndex == 0) Log.i(TAG, "OkHttp Range 协议: ${response.protocol}")
 
-      var written = 0L
-      java.io.BufferedInputStream(connection.inputStream, DOWNLOAD_BUFFER_SIZE).use { input ->
-        java.io.BufferedOutputStream(FileOutputStream(partFile), DOWNLOAD_BUFFER_SIZE).use { output ->
-          val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
-          while (true) {
-            if (cancelDownloadFlag) throw DownloadCancelledException()
-            if (abortFlag.get()) throw java.io.IOException("Range 分片下载已中止")
+        var written = 0L
+        java.io.BufferedInputStream(body.byteStream(), DOWNLOAD_BUFFER_SIZE).use { input ->
+          java.io.BufferedOutputStream(FileOutputStream(partFile), DOWNLOAD_BUFFER_SIZE).use { output ->
+            val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+            while (true) {
+              if (cancelDownloadFlag) throw DownloadCancelledException()
+              if (abortFlag.get()) throw java.io.IOException("Range 分片下载已中止")
 
-            val bytesRead = input.read(buffer)
-            if (bytesRead == -1) break
-            written += bytesRead
-            if (written > expectedLength) {
-              throw RangeDownloadUnsupportedException("分片响应超出请求范围: $start-$end")
+              val bytesRead = input.read(buffer)
+              if (bytesRead == -1) break
+              written += bytesRead
+              if (written > expectedLength) {
+                throw RangeDownloadUnsupportedException("分片响应超出请求范围: $start-$end")
+              }
+              output.write(buffer, 0, bytesRead)
+              aggregator.add(partIndex, bytesRead.toLong())
             }
-            output.write(buffer, 0, bytesRead)
-            aggregator.add(partIndex, bytesRead.toLong())
           }
         }
-      }
-
-      if (written != expectedLength) {
-        throw java.io.IOException("Range 分片不完整: $written / $expectedLength")
+        if (written != expectedLength) {
+          throw java.io.IOException("Range 分片不完整: $written / $expectedLength")
+        }
       }
     } catch (e: Exception) {
       // 一个分片失败时立刻中断其余分片，避免继续消耗流量
@@ -1183,11 +1200,7 @@ object OnnxTranslator {
       }
       throw e
     } finally {
-      activeConnections.remove(connection)
-      try {
-        connection.disconnect()
-      } catch (_: Exception) {
-      }
+      activeCalls.remove(call)
     }
   }
 
@@ -1200,6 +1213,19 @@ object OnnxTranslator {
     val end = match.groupValues[2].toLongOrNull() ?: return null
     val total = match.groupValues[3].toLongOrNull() ?: return null
     return Triple(start, end, total)
+  }
+
+  private fun newDownloadCall(url: String, extraHeaders: Map<String, String> = emptyMap()): Call {
+    val request = Request.Builder()
+      .url(url)
+      .header("User-Agent", "Mozilla/5.0 (Android; Mobile; ScreenTranslator)")
+      .header("Accept-Encoding", "identity")
+      .header("Accept", "*/*")
+      .apply {
+        for ((name, value) in extraHeaders) header(name, value)
+      }
+      .build()
+    return downloadHttpClient.newCall(request)
   }
 
   private fun publishDownloadProgress(
