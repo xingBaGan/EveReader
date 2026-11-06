@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -65,6 +65,7 @@ export default function ProfileScreen() {
   const [liveDownloadProgress, setLiveDownloadProgress] = useState<
     DeviceModelStatus['progress']
   >();
+  const downloadSampleRef = useRef({ bytes: 0, time: 0, speedKbps: 0 });
 
   const refreshModelStatuses = useCallback(async () => {
     const entries = await Promise.all(
@@ -84,13 +85,36 @@ export default function ProfileScreen() {
   }, [refreshModelStatuses]);
 
   useEffect(() => {
-    if (!busyModel) return;
     const timer = setInterval(async () => {
       await refreshModelStatuses();
-      const p = deviceModelManager.getDownloadProgress();
+      const rawProgress = deviceModelManager.getDownloadProgress();
+      const now = Date.now();
+      const previous = downloadSampleRef.current;
+      let sampledSpeedKbps = rawProgress.speedKbps;
+
+      if (rawProgress.status === 'downloading' && sampledSpeedKbps <= 0) {
+        if (previous.time > 0 && rawProgress.downloadedBytes > previous.bytes) {
+          sampledSpeedKbps =
+            ((rawProgress.downloadedBytes - previous.bytes) / 1024) /
+            ((now - previous.time) / 1000);
+        } else if (previous.time > 0 && now - previous.time < 3000) {
+          sampledSpeedKbps = previous.speedKbps;
+        }
+      }
+
+      const p = { ...rawProgress, speedKbps: sampledSpeedKbps };
       setLiveDownloadProgress(p);
+      if (rawProgress.downloadedBytes !== previous.bytes || previous.time === 0) {
+        downloadSampleRef.current = {
+          bytes: rawProgress.downloadedBytes,
+          time: now,
+          speedKbps: sampledSpeedKbps,
+        };
+      }
       if (p.status === 'downloading') {
-        const pack = DEVICE_MODEL_CATALOG.find((item) => item.id === busyModel);
+        const pack = DEVICE_MODEL_CATALOG.find(
+          (item) => item.expectedBytes === p.totalBytes || item.id === busyModel
+        );
         const pct = p.progress > 0 ? (p.progress * 100).toFixed(1) : '0.0';
         const spd = p.speedKbps >= 1024 ? `${(p.speedKbps / 1024).toFixed(2)} MB/s` : `${Math.round(p.speedKbps)} KB/s`;
         const dlMb = (p.downloadedBytes / (1024 * 1024)).toFixed(1);
@@ -200,7 +224,9 @@ export default function ProfileScreen() {
               const isBusy = busyModel === pack.id;
               const progress = status?.progress?.progress ?? 0;
               const downloadProgress =
-                status?.progress ?? (busyModel === pack.id ? liveDownloadProgress : undefined);
+                status?.state === 'installing' && liveDownloadProgress
+                  ? liveDownloadProgress
+                  : status?.progress ?? (busyModel === pack.id ? liveDownloadProgress : undefined);
               const isInstalled = status?.state === 'installed' || status?.state === 'active';
               const unavailable = status?.state === 'unavailable';
               const missingConfig = !pack.downloadUrl || !pack.sha256;
