@@ -258,7 +258,9 @@ export default function ProfileScreen() {
                           : status?.state === 'installing' || isBusy
                             ? downloadProgress?.status === 'extracting'
                               ? '校验并部署中'
-                              : `下载中 ${progress > 0 ? (progress * 100).toFixed(1) : '0.0'}%`
+                              : downloadProgress?.detail
+                                ? downloadProgress.detail
+                                : `下载中 ${progress > 0 ? (progress * 100).toFixed(1) : '0.0'}%`
                             : isInstalled
                               ? '已安装'
                               : '未安装'}
@@ -281,7 +283,9 @@ export default function ProfileScreen() {
                         <Text style={styles.downloadSpeed}>
                           {downloadProgress?.status === 'extracting'
                             ? '正在校验文件'
-                            : formatKbps(downloadProgress?.speedKbps ?? 0)}
+                            : downloadProgress?.detail
+                              ? downloadProgress.detail
+                              : formatKbps(downloadProgress?.speedKbps ?? 0)}
                         </Text>
                         <Text style={styles.downloadBytes}>
                           {formatMegabytes(downloadProgress?.downloadedBytes ?? 0)} /{' '}

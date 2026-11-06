@@ -913,6 +913,7 @@ export interface OnnxDownloadProgress {
   totalBytes: number;
   speedKbps: number;
   error: string;
+  detail: string;
   targetFileName: string;
 }
 
@@ -967,6 +968,7 @@ export function onnxGetDownloadProgress(): OnnxDownloadProgress {
     totalBytes: 0,
     speedKbps: 0,
     error: '',
+    detail: '',
     targetFileName: '',
   };
   if (!NativeModule || typeof NativeModule.onnxGetDownloadProgress !== 'function') {

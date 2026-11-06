@@ -10,6 +10,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.OkHttpClient
@@ -507,6 +508,7 @@ object OnnxTranslator {
   private const val RANGE_DOWNLOAD_MIN_BYTES = 8L * 1024L * 1024L
   private const val RANGE_DOWNLOAD_CONCURRENCY = 4
   private const val RANGE_DOWNLOAD_CHUNK_BYTES = 2L * 1024L * 1024L
+  private const val RANGE_DOWNLOAD_MAX_RETRIES = 3
   private const val DOWNLOAD_PROGRESS_INTERVAL_MS = 400L
   private const val DOWNLOAD_BUFFER_SIZE = 65536
 
@@ -526,6 +528,8 @@ object OnnxTranslator {
   private val rangeHttpClient: OkHttpClient by lazy {
     downloadHttpClient.newBuilder()
       .protocols(listOf(Protocol.HTTP_1_1))
+      .readTimeout(25, TimeUnit.SECONDS)
+      .callTimeout(45, TimeUnit.SECONDS)
       .build()
   }
 
@@ -1092,20 +1096,45 @@ object OnnxTranslator {
               if (abortFlag.get()) throw java.io.IOException("Range 小块下载已中止")
               val start = index.toLong() * partSize
               val end = min(start + partSize - 1, expectedFileBytes - 1)
-              downloadRangePart(
-                url = fileUrl,
-                partFile = File(tempDir, "part$index.tmp"),
-                start = start,
-                end = end,
-                totalFileBytes = expectedFileBytes,
-                partIndex = index,
-                aggregator = aggregator,
-                abortFlag = abortFlag
-              )
+              val partFile = File(tempDir, "part$index.tmp")
+              var attempt = 0
+              while (true) {
+                try {
+                  downloadRangePart(
+                    url = fileUrl,
+                    partFile = partFile,
+                    start = start,
+                    end = end,
+                    totalFileBytes = expectedFileBytes,
+                    partIndex = index,
+                    aggregator = aggregator,
+                    abortFlag = abortFlag
+                  )
+                  break
+                } catch (e: DownloadCancelledException) {
+                  throw e
+                } catch (e: CancellationException) {
+                  throw e
+                } catch (e: Exception) {
+                  partFile.delete()
+                  aggregator.resetPart(index)
+                  attempt++
+                  if (attempt > RANGE_DOWNLOAD_MAX_RETRIES) throw e
+                  publishRetryProgress(progressKey, index, attempt, RANGE_DOWNLOAD_MAX_RETRIES)
+                  Log.w(TAG, "Range 块 #$index 失败，重试 $attempt/$RANGE_DOWNLOAD_MAX_RETRIES: ${e.message}")
+                  delay(500L * attempt)
+                }
+              }
             }
           }
         }
-        workers.forEach { it.await() }
+        try {
+          workers.forEach { it.await() }
+        } catch (e: Exception) {
+          abortFlag.set(true)
+          abortActiveConnections()
+          throw e
+        }
       }
 
       if (cancelDownloadFlag) throw DownloadCancelledException()
@@ -1228,11 +1257,6 @@ object OnnxTranslator {
         )
       }
     } catch (e: Exception) {
-      // 一个分片失败时立刻中断其余分片，避免继续消耗流量
-      if (e !is DownloadCancelledException && !cancelDownloadFlag) {
-        abortFlag.set(true)
-        abortActiveConnections()
-      }
       throw e
     } finally {
       activeCalls.remove(call)
@@ -1294,6 +1318,16 @@ object OnnxTranslator {
       "totalBytes" to 0L,
       "speedKbps" to 0.0,
       "error" to "用户已取消下载",
+      "targetFileName" to progressKey
+    )
+  }
+
+  private fun publishRetryProgress(progressKey: String, partIndex: Int, attempt: Int, maxRetries: Int) {
+    downloadProgressState = downloadProgressState + mapOf(
+      "status" to "downloading",
+      "speedKbps" to 0.0,
+      "error" to "",
+      "detail" to "分块 #$partIndex 超时，正在重试 $attempt/$maxRetries",
       "targetFileName" to progressKey
     )
   }
@@ -1486,6 +1520,13 @@ private class RangeProgressAggregator(
         lastPublishMs = now
         onProgress(baseBytes + sum, totalBytes, smoothedSpeedKbps)
       }
+    }
+  }
+
+  fun resetPart(partIndex: Int) {
+    if (partIndex !in partBytes.indices) return
+    synchronized(this) {
+      partBytes[partIndex] = 0L
     }
   }
 
