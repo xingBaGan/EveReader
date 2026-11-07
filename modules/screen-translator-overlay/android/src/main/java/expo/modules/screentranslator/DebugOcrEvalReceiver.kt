@@ -20,7 +20,8 @@ import java.util.Locale
  *       -n com.anonymous.zlibapp/expo.modules.screentranslator.DebugOcrEvalReceiver
  *   adb pull /sdcard/Android/data/com.anonymous.zlibapp/files/eval/out.json
  *
- * 额外 extra：pipeline=true 时同时跑 MangaOcrProcessor.processImage 全链路
+ * 额外 extra：pipeline=true 时运行与悬浮窗线上路径相同的
+ * MangaOcrProcessor.processImageFast，避免评测旧流水线产生假回归。
  */
 class DebugOcrEvalReceiver : BroadcastReceiver() {
 
@@ -86,7 +87,15 @@ class DebugOcrEvalReceiver : BroadcastReceiver() {
           if (runPipeline) {
             val t1 = System.currentTimeMillis()
             val bubbles = try {
-              runBlocking { MangaOcrProcessor.processImage(bmp, "ja", "auto", app) }
+              runBlocking {
+                MangaOcrProcessor.processImageFast(
+                  bitmap = bmp,
+                  lang = "ja",
+                  filterLang = "auto",
+                  viewportMode = "full",
+                  context = app
+                )
+              }
             } catch (e: Exception) {
               Log.e("DebugOcrEval", "pipeline failed", e)
               emptyList()

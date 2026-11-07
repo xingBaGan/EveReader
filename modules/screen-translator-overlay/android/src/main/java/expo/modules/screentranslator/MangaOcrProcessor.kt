@@ -384,17 +384,20 @@ object MangaOcrProcessor {
       }
     }
 
-    // 第二阶段：轻微边缘交叠解耦 (Edge Separation for slight overlap)
-    for (i in 0 until mutableList.size) {
-      val bA = mutableList[i]
+    // 第二阶段：窄竖排残片抑制（必须在边缘解耦前执行，否则残片会被推开而失去覆盖证据）
+    val fragmentFiltered = removeCoveredNarrowVerticalFragments(mutableList)
+
+    // 第三阶段：轻微边缘交叠解耦 (Edge Separation for slight overlap)
+    for (i in 0 until fragmentFiltered.size) {
+      val bA = fragmentFiltered[i]
       val boxA = bA["box"] as? Map<*, *> ?: continue
       var ax1 = (boxA["x"] as? Number)?.toInt() ?: 0
       var ay1 = (boxA["y"] as? Number)?.toInt() ?: 0
       var aw = (boxA["width"] as? Number)?.toInt() ?: 0
       var ah = (boxA["height"] as? Number)?.toInt() ?: 0
 
-      for (j in i + 1 until mutableList.size) {
-        val bB = mutableList[j]
+      for (j in i + 1 until fragmentFiltered.size) {
+        val bB = fragmentFiltered[j]
         val boxB = bB["box"] as? Map<*, *> ?: continue
         var bx1 = (boxB["x"] as? Number)?.toInt() ?: 0
         var by1 = (boxB["y"] as? Number)?.toInt() ?: 0
@@ -440,7 +443,95 @@ object MangaOcrProcessor {
       }
     }
 
-    return mutableList
+    return fragmentFiltered
+  }
+
+  /**
+   * 第二阶段：窄竖排残片抑制。
+   *
+   * 同一段竖排对白常会同时出现一个覆盖完整的框和一个很窄的重复/残片框
+   * （例如 page19 右侧完整框后面的紫色窄框）。仅当窄框被同一区域的更完整框
+   * 在高度/面积上实质覆盖，且文本相同、包含或高相似时才删除窄框。
+   * 只删除窄残片，不合并、不扩大完整框，因此不会误吞相邻的中央/右侧独立对白。
+   */
+  private fun removeCoveredNarrowVerticalFragments(
+    bubbles: List<MutableMap<String, Any>>
+  ): List<MutableMap<String, Any>> {
+    if (bubbles.size <= 1) return bubbles
+
+    val drop = BooleanArray(bubbles.size)
+    for (i in bubbles.indices) {
+      val narrow = bubbles[i]
+      val narrowBox = narrow["box"] as? Map<*, *> ?: continue
+      val nx = (narrowBox["x"] as? Number)?.toInt() ?: continue
+      val ny = (narrowBox["y"] as? Number)?.toInt() ?: continue
+      val nw = (narrowBox["width"] as? Number)?.toInt() ?: continue
+      val nh = (narrowBox["height"] as? Number)?.toInt() ?: continue
+      if (nw <= 0 || nh <= 0) continue
+      val narrowRect = Rect(nx, ny, nx + nw, ny + nh)
+      val narrowDirection = narrow["direction"] as? String
+      val narrowIsVertical = narrowDirection == "vertical" ||
+        (narrowDirection != "horizontal" && nh > nw * 1.15f)
+      if (!narrowIsVertical) continue
+      val narrowText = narrow["sourceText"] as? String ?: ""
+
+      for (j in bubbles.indices) {
+        if (i == j) continue
+        val complete = bubbles[j]
+        val completeBox = complete["box"] as? Map<*, *> ?: continue
+        val cx = (completeBox["x"] as? Number)?.toInt() ?: continue
+        val cy = (completeBox["y"] as? Number)?.toInt() ?: continue
+        val cw = (completeBox["width"] as? Number)?.toInt() ?: continue
+        val ch = (completeBox["height"] as? Number)?.toInt() ?: continue
+        if (cw <= 0 || ch <= 0) continue
+        val completeRect = Rect(cx, cy, cx + cw, cy + ch)
+        val completeDirection = complete["direction"] as? String
+        val completeIsVertical = completeDirection == "vertical" ||
+          (completeDirection != "horizontal" && ch > cw * 1.15f)
+        if (!completeIsVertical) continue
+        val completeText = complete["sourceText"] as? String ?: ""
+
+        if (isCoveredNarrowVerticalFragment(narrowRect, narrowText, completeRect, completeText)) {
+          drop[i] = true
+          break
+        }
+      }
+    }
+
+    if (drop.none { it }) return bubbles
+    return bubbles.filterIndexed { index, _ -> !drop[index] }
+  }
+
+  private fun isCoveredNarrowVerticalFragment(
+    narrow: Rect,
+    narrowText: String,
+    complete: Rect,
+    completeText: String
+  ): Boolean {
+    if (narrow.width() <= 0 || narrow.height() <= 0 || complete.width() <= 0 || complete.height() <= 0) {
+      return false
+    }
+    // 残片必须明显更窄，且不能与完整框同宽或只差几个像素
+    if (narrow.width() >= complete.width() - 6) return false
+    if (narrow.width().toFloat() > complete.width().toFloat() * 0.70f) return false
+
+    val inter = computeIntersection(narrow, complete)
+    if (inter <= 0f) return false
+    val narrowArea = narrow.width().toFloat() * narrow.height().toFloat()
+    if (narrowArea <= 0f) return false
+    val heightOverlap = max(0, min(narrow.bottom, complete.bottom) - max(narrow.top, complete.top)).toFloat()
+    val heightCoverage = heightOverlap / narrow.height().toFloat()
+    val areaCoverage = inter / narrowArea
+    if (heightCoverage < 0.72f || areaCoverage < 0.55f) return false
+
+    val narrowClean = narrowText.replace(Regex("[\\s\\p{P}]+"), "")
+    val completeClean = completeText.replace(Regex("[\\s\\p{P}]+"), "")
+    if (narrowClean.isEmpty() || completeClean.isEmpty()) return false
+    // 残片不应比完整框拥有更多有效文字，避免删除包含更多上下文的独立框
+    if (narrowClean.length > completeClean.length + 1) return false
+
+    if (completeClean.contains(narrowClean) || narrowClean.contains(completeClean)) return true
+    return computeNormalizedSequenceSimilarity(narrowText, completeText) >= 0.85f
   }
 
   /**
@@ -1174,10 +1265,11 @@ object MangaOcrProcessor {
       val tightBox = if (sortedLines.isNotEmpty()) {
         val padX = 6
         val padY = 6
-        val minX = max(0, sortedLines.minOf { it.rect.left } - padX)
-        val maxX = min(srcW, sortedLines.maxOf { it.rect.right } + padX)
-        val minY = max(0, sortedLines.minOf { it.rect.top } - padY)
-        val maxY = min(srcH, sortedLines.maxOf { it.rect.bottom } + padY)
+        // ML Kit returns crop-local coordinates, just like CharSpot above.
+        val minX = max(0, cropLeft + sortedLines.minOf { it.rect.left } - padX)
+        val maxX = min(srcW, cropLeft + sortedLines.maxOf { it.rect.right } + padX)
+        val minY = max(0, cropTop + sortedLines.minOf { it.rect.top } - padY)
+        val maxY = min(srcH, cropTop + sortedLines.maxOf { it.rect.bottom } + padY)
         mapOf(
           "x" to minX,
           "y" to minY,
@@ -1212,6 +1304,67 @@ object MangaOcrProcessor {
   }
 
   /**
+   * 一个宽检测框若同时实质覆盖两个横向分离的竖排气泡，就不能作为一个整体区域
+   * 去做增强并把跨两列的 tightBox 回写其中任意一个框，否则会重新合并两段对白，
+   * 并与另一侧已有的气泡形成重复框。
+   *
+   * 这里把这种检测框按“同一列内可合并”的水平间距拆成若干子区域；只有真正
+   * 分离的列才会拆，普通单气泡（只覆盖一个框）返回空列表，保持原增强路径。
+   */
+  private fun bridgeSubRegions(
+    detection: Rect,
+    bubbles: List<Map<String, Any>>
+  ): List<Rect> {
+    val covered = mutableListOf<Rect>()
+    for (bubble in bubbles) {
+      val box = bubble["box"] as? Map<*, *> ?: continue
+      val bx = (box["x"] as? Number)?.toInt() ?: continue
+      val by = (box["y"] as? Number)?.toInt() ?: continue
+      val bw = (box["width"] as? Number)?.toInt() ?: continue
+      val bh = (box["height"] as? Number)?.toInt() ?: continue
+      if (bw <= 0 || bh <= 0) continue
+
+      val rect = Rect(bx, by, bx + bw, by + bh)
+      val area = bw.toFloat() * bh.toFloat()
+      if (area <= 0f) continue
+      if (computeIntersection(rect, detection) / area < 0.5f) continue
+
+      val direction = bubble["direction"] as? String
+      val isVertical = direction == "vertical" ||
+        (direction != "horizontal" && bh > bw * 1.15f)
+      if (!isVertical) continue
+      covered.add(rect)
+    }
+    if (covered.size < 2) return emptyList()
+
+    val sorted = covered.sortedBy { it.left }
+    val groups = mutableListOf<MutableList<Rect>>()
+    for (rect in sorted) {
+      val group = groups.lastOrNull()
+      if (group != null) {
+        val groupRight = group.maxOf { it.right }
+        val minWidth = min(rect.width(), group.minOf { it.width() })
+        val edgeGap = rect.left - groupRight
+        if (edgeGap <= max(16f, minWidth * 0.5f)) {
+          group.add(rect)
+          continue
+        }
+      }
+      groups.add(mutableListOf(rect))
+    }
+    if (groups.size < 2) return emptyList()
+
+    val regions = groups.mapNotNull { group ->
+      val left = max(detection.left, group.minOf { it.left })
+      val top = max(detection.top, group.minOf { it.top })
+      val right = min(detection.right, group.maxOf { it.right })
+      val bottom = min(detection.bottom, group.maxOf { it.bottom })
+      if (right > left && bottom > top) Rect(left, top, right, bottom) else null
+    }
+    return if (regions.size >= 2) regions else emptyList()
+  }
+
+  /**
    * 将漫画专用深度学习检测器 (ComicTextDetector) 产出的目标框与全屏 OCR 结果深度融合
    * 1. 弥补全屏 ML Kit 漏检的拟声词 (SFX)、艺术字 (描き文字) 与异形气泡；
    * 2. 对每个未匹配上的专用检测框进行局部切片靶向增强 OCR，最大化文字产出率；
@@ -1230,9 +1383,27 @@ object MangaOcrProcessor {
     var nextId = 1000
 
     val textDetections = detections.filter { it.category == 1 || it.category == 2 }
+    // 宽桥接检测框先拆成每个分离气泡列的子检测，避免其跨列 tightBox 回写单个气泡
+    val expandedDetections = textDetections.flatMap { det ->
+      val subRegions = bridgeSubRegions(det.bounds, resultList)
+      if (subRegions.size >= 2) {
+        subRegions.map { region ->
+          ComicTextDetector.ComicDetection(
+            bounds = region,
+            category = det.category,
+            labelName = det.labelName,
+            score = det.score,
+            fromFullView = det.fromFullView
+          )
+        }
+      } else {
+        listOf(det)
+      }
+    }
 
-    for (det in textDetections) {
+    for (det in expandedDetections) {
       val dRect = det.bounds
+      if (isClippedByScreenEdge(dRect, sourceBitmap.width, sourceBitmap.height)) continue
 
       var matchedExistingIndex = -1
       for (i in resultList.indices) {
@@ -1280,6 +1451,13 @@ object MangaOcrProcessor {
           )
           if (enhanced != null) {
             val enhancedText = enhanced["sourceText"] as? String ?: ""
+            val enhancedConf = (enhanced["confidence"] as? Number)?.toFloat() ?: 0f
+            // A second overlapping fragment must not erase a complete, stronger result.
+            if (existing.containsKey("chars") && enhancedText.length < curText.length &&
+                enhancedConf < curConf) {
+              android.util.Log.i("BubbleOCR", "[FUSION_KEEP] keeping '$curText' over '$enhancedText'")
+              continue
+            }
             if (enhancedText.isNotBlank()) {
               existing["sourceText"] = enhancedText
               existing["lines"] = enhanced["lines"] as? List<*> ?: listOf(enhancedText)
@@ -2362,10 +2540,11 @@ object MangaOcrProcessor {
    * 将去重后的全量 TextLines 聚类为独立对话气泡与文本块
    */
   /**
-   * 判定文本块是否紧贴或跨越屏幕物理上下边缘（残缺出界文本）
+   * 判定文本块是否紧贴或跨越图片四边（残缺出界文本）
    * 用户明确要求：上下边缘文字被物理截断、上下文残缺、识别与翻译效果极差，坚决彻底过滤掉！
    */
   private fun isClippedByScreenEdge(r: Rect, w: Int, h: Int): Boolean {
+    if (r.left <= 2 || r.right >= w - 2) return true
     if (r.top <= 10) return true // 顶部贴边被切断
     if (r.bottom >= h - 12) return true // 底部贴边被切断
     return false
@@ -2394,7 +2573,9 @@ object MangaOcrProcessor {
       validLines.any { hasJapaneseSpecificFeatures(it.text) }
 
     // 并查集聚合属于同一气泡或段落的文字行 (紧凑文本包络，基于字距、排版与物理黑边阻断)
-    val clusters = clusterLines(validLines, bitmap)
+    val clusters = clusterLines(validLines, bitmap).flatMap { cluster ->
+      splitDistantVerticalClusters(cluster)
+    }
 
     val resultList = mutableListOf<Map<String, Any>>()
     var indexCounter = 1
@@ -2814,6 +2995,77 @@ object MangaOcrProcessor {
   }
 
   /**
+   * 竖排相邻列允许的最大水平边缘间距。与 shouldMergeLines 的竖排列合并条件
+   * 共用同一套大字/列宽几何语义，避免二次拆分使用另一套固定阈值而把
+   * 正常宽列多列气泡误拆。
+   */
+  private fun verticalColumnGap(
+    aWidth: Int,
+    aCharSize: Float,
+    bWidth: Int,
+    bCharSize: Float
+  ): Float {
+    val maxColWidth = max(max(1, aWidth), max(1, bWidth)).toFloat()
+    val isLargeFont = max(aCharSize, bCharSize) > 30f || maxColWidth > 35f
+    return if (isLargeFont) {
+      max(42f, min(120f, maxColWidth * 1.35f))
+    } else {
+      min(42f, maxColWidth * 1.25f)
+    }
+  }
+
+  /**
+   * 并查集会受到跨尺度噪声候选的传递性影响：A 与 B 相邻、B 又误触 C 时，
+   * 原本相距很远的两个竖排对白会被串进同一连通簇。这里按真实竖列的
+   * 水平边缘间距进行二次断开，而不是依赖固定上限的相邻中心距。
+   *
+   * 判定使用与 shouldMergeLines 完全一致的列宽/字号几何：只有边缘间距
+   * 超过同一气泡内允许的最大列间距时才拆开。因此宽列、多列正常气泡即使
+   * 中心距很大，只要边缘间距仍在合并语义内，就不会被误拆。
+   */
+  private fun splitDistantVerticalClusters(cluster: List<TextLineItem>): List<List<TextLineItem>> {
+    if (cluster.size < 2) return listOf(cluster)
+
+    val verticalItems = cluster.filter { it.isVertical || it.rect.height() > it.rect.width() * 1.15f }
+    if (verticalItems.size * 2 < cluster.size) return listOf(cluster)
+
+    val sorted = cluster.sortedWith(compareBy({ it.rect.left }, { it.rect.top }))
+    val groups = mutableListOf<MutableList<TextLineItem>>()
+    var current = mutableListOf(sorted.first())
+    groups.add(current)
+
+    var currentRight = sorted.first().rect.right
+    var currentMaxWidth = max(1, sorted.first().rect.width())
+    var currentMaxCharSize = max(1f, sorted.first().charSize)
+
+    for (index in 1 until sorted.size) {
+      val item = sorted[index]
+      val edgeGap = item.rect.left - currentRight
+      val allowedGap = verticalColumnGap(
+        currentMaxWidth,
+        currentMaxCharSize,
+        max(1, item.rect.width()),
+        max(1f, item.charSize)
+      )
+
+      if (edgeGap > allowedGap) {
+        current = mutableListOf()
+        groups.add(current)
+        currentRight = item.rect.right
+        currentMaxWidth = max(1, item.rect.width())
+        currentMaxCharSize = max(1f, item.charSize)
+      } else {
+        currentRight = max(currentRight, item.rect.right)
+        currentMaxWidth = max(currentMaxWidth, item.rect.width())
+        currentMaxCharSize = max(currentMaxCharSize, item.charSize)
+      }
+      current.add(item)
+    }
+
+    return if (groups.size > 1) groups else listOf(cluster)
+  }
+
+  /**
    * 跨气泡边界检测 (借鉴 overlay-translator 与 comic-translate)：
    * 检查两行/两列文字之间是否跨越了气泡黑色边框或插画背景。
    * 支持左右相邻列与上下相邻行两种几何排布，绝不误阻断同气泡内上下堆叠行！
@@ -2929,25 +3181,29 @@ object MangaOcrProcessor {
       return false
     }
 
-    val charSizeBase = max(a.charSize, b.charSize)
-    val isLargeFont = charSizeBase > 30f || max(ra.height(), rb.height()) > 35 || max(ra.width(), rb.width()) > 35
-
     val isAVertical = a.isVertical || (a.text.length <= 2 && b.isVertical)
     val isBVertical = b.isVertical || (b.text.length <= 2 && a.isVertical)
+    val isVerticalPair = isAVertical && isBVertical
+
+    val charSizeBase = max(a.charSize, b.charSize)
+    // 竖排正文的矩形天然很高，不能把“列高 > 35px”当成大字体，否则几乎所有
+    // 竖排对白都会获得 120px 的跨列合并距离，page19 这类相邻对白会被串成大框。
+    // 大字体只看字符尺寸和文字的短轴：竖排看列宽，横排看行高。
+    val shortAxisExtent = if (isVerticalPair) {
+      max(ra.width(), rb.width())
+    } else {
+      max(ra.height(), rb.height())
+    }
+    val isLargeFont = charSizeBase > 30f || shortAxisExtent > 35
 
     // 2. 竖排日漫规则：同一气泡内的多列竖排文本 (左右相邻并列)
-    if (isAVertical && isBVertical) {
+    if (isVerticalPair) {
       val xDist = if (ra.right < rb.left) rb.left - ra.right else if (rb.right < ra.left) ra.left - rb.right else 0
       val yOverlap = max(0, min(ra.bottom, rb.bottom) - max(ra.top, rb.top))
       val minH = min(ra.height(), rb.height())
-      val maxColWidth = max(ra.width(), rb.width()).toFloat()
 
-      // 列间距限制：普通正文 <= 42px，大字体/艺术字自适应放宽至 120px
-      val maxAllowedGap = if (isLargeFont) {
-        max(42f, min(120f, maxColWidth * 1.35f))
-      } else {
-        min(42f, maxColWidth * 1.25f)
-      }
+      // 列间距限制与二次拆分共用同一几何语义：普通正文 <= 42px，大字体自适应放宽至 120px
+      val maxAllowedGap = verticalColumnGap(ra.width(), a.charSize, rb.width(), b.charSize)
 
       if (xDist <= maxAllowedGap && yOverlap >= minH * 0.35f && abs(ra.top - rb.top) <= minH * 0.55f) {
         if (!isSeparatedByBorder(bitmap, ra, rb, isLargeFont)) {
@@ -2957,7 +3213,7 @@ object MangaOcrProcessor {
     }
 
     // 2.5 竖排日漫同气泡单列上下堆叠行规则 (如上方短句「あれ？」与下方主句「鮮血…？」)
-    if (isAVertical && isBVertical) {
+    if (isVerticalPair) {
       val yDist = if (ra.bottom < rb.top) rb.top - ra.bottom else if (rb.bottom < ra.top) ra.top - rb.bottom else 0
       val xOverlap = max(0, min(ra.right, rb.right) - max(ra.left, rb.left))
       val minW = min(ra.width(), rb.width())

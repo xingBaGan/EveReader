@@ -873,4 +873,284 @@ console.log('Running Manga Bubble Recognition Unit Tests...\n');
   console.log('  ✓ Stale ACK correctly ignored without unlocking or corrupting active request');
 }
 
-console.log('\nAll 16 Unit Tests Passed Successfully!\n');
+// Test 17: Regression - Tall vertical body text is not a large-font candidate
+{
+  console.log('[Test 17] Regression: Tall vertical columns keep normal merge distance:');
+  const classifyLargeFont = (a, b) => {
+    const verticalPair = a.vertical && b.vertical;
+    const charSizeBase = Math.max(a.charSize, b.charSize);
+    const shortAxisExtent = verticalPair
+      ? Math.max(a.width, b.width)
+      : Math.max(a.height, b.height);
+    return charSizeBase > 30 || shortAxisExtent > 35;
+  };
+
+  const left = { vertical: true, charSize: 19, width: 28, height: 150 };
+  const right = { vertical: true, charSize: 20, width: 30, height: 145 };
+  assert.strictEqual(classifyLargeFont(left, right), false,
+    'Tall vertical body-text columns must not receive the 120px large-font merge gap');
+  assert.strictEqual(classifyLargeFont(
+    { vertical: true, charSize: 38, width: 48, height: 160 },
+    { vertical: true, charSize: 36, width: 46, height: 150 },
+  ), true, 'Actual large vertical lettering must keep large-font handling');
+  console.log('  ✓ Vertical height no longer misclassifies normal dialogue as large lettering');
+}
+
+// ============================================================================
+// Kotlin 几何规则镜像
+// 说明：仓库没有 Kotlin JVM 单测设施，本轮只允许修改 MangaOcrProcessor.kt 与
+// tests/bubble-rules.test.js，因此以下函数逐条镜像 Kotlin 的判定条件，用于锁定
+// 几何语义和失败场景。它不是对 Kotlin 的真实调用；最终仍须由 page19 真机回归
+// 验证。边界：JS 不覆盖 Rect 取整、OCR 文本、Bitmap 像素和 ComicTextDetector 输出。
+// ============================================================================
+
+// 对应 Kotlin: verticalColumnGap()
+function verticalColumnGap(aWidth, aCharSize, bWidth, bCharSize) {
+  const maxColWidth = Math.max(Math.max(1, aWidth), Math.max(1, bWidth));
+  const isLargeFont = Math.max(aCharSize, bCharSize) > 30 || maxColWidth > 35;
+  return isLargeFont
+    ? Math.max(42, Math.min(120, maxColWidth * 1.35))
+    : Math.min(42, maxColWidth * 1.25);
+}
+
+// 对应 Kotlin: splitDistantVerticalClusters() 的按左边界归组 + 列边缘间距分支
+function splitVerticalColumnsByEdgeGap(items) {
+  const sorted = [...items].sort((a, b) => (a.left - b.left) || (a.top - b.top));
+  const groups = [[sorted[0]]];
+  let currentRight = sorted[0].left + sorted[0].width;
+  let currentMaxWidth = Math.max(1, sorted[0].width);
+  let currentMaxChar = Math.max(1, sorted[0].charSize);
+
+  for (let index = 1; index < sorted.length; index += 1) {
+    const item = sorted[index];
+    const edgeGap = item.left - currentRight;
+    const allowedGap = verticalColumnGap(
+      currentMaxWidth, currentMaxChar,
+      Math.max(1, item.width), Math.max(1, item.charSize),
+    );
+    if (edgeGap > allowedGap) {
+      groups.push([]);
+      currentRight = item.left + item.width;
+      currentMaxWidth = Math.max(1, item.width);
+      currentMaxChar = Math.max(1, item.charSize);
+    } else {
+      currentRight = Math.max(currentRight, item.left + item.width);
+      currentMaxWidth = Math.max(currentMaxWidth, item.width);
+      currentMaxChar = Math.max(currentMaxChar, item.charSize);
+    }
+    groups.at(-1).push(item);
+  }
+  return groups;
+}
+
+// 对应 Kotlin: bridgeSubRegions()
+function bridgeSubRegions(detection, bubbles) {
+  const overlap = (a, b) => Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x))
+    * Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  const covered = bubbles
+    .filter((bubble) => bubble.vertical && overlap(bubble, detection) / (bubble.w * bubble.h) >= 0.5)
+    .sort((a, b) => a.x - b.x);
+  if (covered.length < 2) return [];
+
+  const groups = [];
+  for (const rect of covered) {
+    const group = groups.at(-1);
+    if (group) {
+      const groupRight = Math.max(...group.map((item) => item.x + item.w));
+      const minWidth = Math.min(rect.w, ...group.map((item) => item.w));
+      const edgeGap = rect.x - groupRight;
+      if (edgeGap <= Math.max(16, minWidth * 0.5)) {
+        group.push(rect);
+        continue;
+      }
+    }
+    groups.push([rect]);
+  }
+  if (groups.length < 2) return [];
+
+  const regions = groups.map((group) => {
+    const x = Math.max(detection.x, Math.min(...group.map((item) => item.x)));
+    const y = Math.max(detection.y, Math.min(...group.map((item) => item.y)));
+    const right = Math.min(detection.x + detection.w, Math.max(...group.map((item) => item.x + item.w)));
+    const bottom = Math.min(detection.y + detection.h, Math.max(...group.map((item) => item.y + item.h)));
+    return { x, y, w: right - x, h: bottom - y };
+  }).filter((region) => region.w > 0 && region.h > 0);
+
+  return regions.length >= 2 ? regions : [];
+}
+
+// 对应 Kotlin: removeCoveredNarrowVerticalFragments() / isCoveredNarrowVerticalFragment()
+function isCoveredNarrowVerticalFragment(narrow, narrowText, complete, completeText) {
+  if (narrow.w <= 0 || narrow.h <= 0 || complete.w <= 0 || complete.h <= 0) return false;
+  if (narrow.w >= complete.w - 6) return false;
+  if (narrow.w > complete.w * 0.70) return false;
+
+  const interW = Math.max(0, Math.min(narrow.x + narrow.w, complete.x + complete.w) - Math.max(narrow.x, complete.x));
+  const interH = Math.max(0, Math.min(narrow.y + narrow.h, complete.y + complete.h) - Math.max(narrow.y, complete.y));
+  const inter = interW * interH;
+  if (inter <= 0) return false;
+  const heightCoverage = interH / narrow.h;
+  const areaCoverage = inter / (narrow.w * narrow.h);
+  if (heightCoverage < 0.72 || areaCoverage < 0.55) return false;
+
+  const narrowClean = narrowText.replace(/[\s\p{P}]+/gu, '');
+  const completeClean = completeText.replace(/[\s\p{P}]+/gu, '');
+  if (!narrowClean || !completeClean) return false;
+  if (narrowClean.length > completeClean.length + 1) return false;
+
+  if (completeClean.includes(narrowClean) || narrowClean.includes(completeClean)) return true;
+  return computeNormalizedSequenceSimilarity(narrowText, completeText) >= 0.85;
+}
+
+function isVerticalBubbleForFragment(box) {
+  return box.direction === 'vertical'
+    || (box.direction !== 'horizontal' && box.h > box.w * 1.15);
+}
+
+function removeCoveredNarrowVerticalFragments(bubbles) {
+  if (bubbles.length <= 1) return bubbles;
+  const drop = bubbles.map(() => false);
+  for (let i = 0; i < bubbles.length; i += 1) {
+    const narrow = bubbles[i];
+    if (!isVerticalBubbleForFragment(narrow)) continue;
+    for (let j = 0; j < bubbles.length; j += 1) {
+      if (i === j) continue;
+      const complete = bubbles[j];
+      if (!isVerticalBubbleForFragment(complete)) continue;
+      if (isCoveredNarrowVerticalFragment(narrow, narrow.text || '', complete, complete.text || '')) {
+        drop[i] = true;
+        break;
+      }
+    }
+  }
+  return bubbles.filter((_, index) => !drop[index]);
+}
+
+// Test 18: Page19-like distant vertical columns split by edge gap, not center gap
+{
+  console.log('[Test 18] Regression: Distant vertical columns split by edge gap:');
+  const groups = splitVerticalColumnsByEdgeGap([
+    // 中央列：同一列上下两个 OCR 行
+    { left: 410, top: 32, width: 101, charSize: 20 },
+    { left: 411, top: 240, width: 99, charSize: 20 },
+    // 右侧独立列
+    { left: 648, top: 24, width: 58, charSize: 20 },
+  ]);
+  assert.deepStrictEqual(groups.map(group => group.length), [2, 1],
+    'The right dialogue must split from the center column at the 137px edge gap');
+  console.log('  ✓ Edge gap splits page19 center/right columns while stacked rows stay together');
+}
+
+// Test 19: Normal wide multi-column bubble is NOT split
+{
+  console.log('[Test 19] Regression: Wide multi-column bubble keeps one group:');
+  const normalWide = splitVerticalColumnsByEdgeGap([
+    { left: 100, top: 40, width: 60, charSize: 20 },
+    { left: 240, top: 42, width: 60, charSize: 20 },
+    { left: 380, top: 38, width: 58, charSize: 20 },
+  ]);
+  assert.strictEqual(normalWide.length, 1,
+    '60px-wide columns with 80px edge gaps must remain one normal multi-column bubble');
+
+  const boundary = splitVerticalColumnsByEdgeGap([
+    { left: 100, top: 40, width: 100, charSize: 20 },
+    { left: 320, top: 42, width: 100, charSize: 20 },
+  ]);
+  assert.strictEqual(boundary.length, 1,
+    'Large-font columns at the allowed 120px edge gap must not be split');
+  console.log('  ✓ Wide/large multi-column bubbles are not falsely split');
+}
+
+// Test 20: Wide bridge detection is split into per-bubble regions; single bubble unchanged
+{
+  console.log('[Test 20] Regression: Wide bridge detection cannot re-merge separated bubbles:');
+  const bubbles = [
+    { x: 410, y: 32, w: 101, h: 199, vertical: true },
+    { x: 677, y: 24, w: 33, h: 212, vertical: true },
+  ];
+  const wideDetection = { x: 409, y: 32, w: 306, h: 199 };
+  const regions = bridgeSubRegions(wideDetection, bubbles);
+
+  assert.strictEqual(regions.length, 2,
+    'A 306px detection covering two separated vertical bubbles must produce two sub-regions');
+  assert.ok(regions.every((region) => region.w <= 101),
+    'No sub-region may keep a cross-both tightBox width');
+  assert.ok(regions[0].x + regions[0].w <= 511 && regions[1].x >= 677,
+    'Each sub-region must stay within its own dialogue column');
+
+  // 失败现场：无保护时 enhanced tightBox 为 412..679，跨过右侧气泡并与其重复
+  const unguardedTightBox = { x: 412, y: 32, w: 267, h: 194 };
+  assert.ok(regions.every((region) => region.w !== unguardedTightBox.w),
+    'The cross-both enhanced tightBox must never be used as one bubble box');
+
+  const singleBubbleDetection = { x: 409, y: 30, w: 110, h: 205 };
+  assert.deepStrictEqual(bridgeSubRegions(singleBubbleDetection, bubbles), [],
+    'A normal single-bubble detection must keep the original enhancement path');
+  console.log('  ✓ Bridge detection split per bubble; single-bubble enhancement untouched');
+}
+
+// Test 21: Page19 right #3 complete box + narrow duplicate fragment -> keep complete only
+{
+  console.log('[Test 21] Regression: Covered narrow vertical fragment is removed:');
+  const complete = {
+    x: 648, y: 24, w: 58, h: 212, direction: 'vertical',
+    text: '吉原…見ないでくれ…!',
+  };
+  const containedFragment = {
+    x: 650, y: 36, w: 22, h: 190, direction: 'vertical',
+    text: '見ないでくれ…!',
+  };
+  const kept = removeCoveredNarrowVerticalFragments([complete, containedFragment]);
+  assert.strictEqual(kept.length, 1, 'Narrow contained fragment must be removed');
+  assert.strictEqual(kept[0].w, 58, 'The complete wider #3 box must be retained');
+  assert.strictEqual(kept[0].text, complete.text);
+
+  const typoFragment = {
+    x: 650, y: 36, w: 22, h: 190, direction: 'vertical',
+    text: '吉原見ないでれ',
+  };
+  const keptTypo = removeCoveredNarrowVerticalFragments([complete, typoFragment]);
+  assert.strictEqual(keptTypo.length, 1,
+    'A high-similarity OCR fragment must also be removed, not kept as a second box');
+  console.log('  ✓ Complete #3 kept; contained/OCR narrow fragments removed');
+}
+
+// Test 22: Different-text vertical boxes must both survive, even with high geometric coverage
+{
+  console.log('[Test 22] Regression: Different nearby vertical texts are not deduplicated:');
+  const complete = {
+    x: 648, y: 24, w: 58, h: 212, direction: 'vertical',
+    text: '吉原…見ないでくれ…!',
+  };
+  const different = {
+    x: 670, y: 30, w: 30, h: 200, direction: 'vertical',
+    text: 'お前の母親に童貞奪われるところなんて…!',
+  };
+  const kept = removeCoveredNarrowVerticalFragments([complete, different]);
+  assert.strictEqual(kept.length, 2,
+    'Different text must not be deleted merely because its box is narrow and covered');
+  assert.ok(kept.some((b) => b.text === complete.text));
+  assert.ok(kept.some((b) => b.text === different.text));
+  console.log('  ✓ Different text remains separate even with high area overlap');
+}
+
+// Test 23: Page19 center/right separation is preserved
+{
+  console.log('[Test 23] Regression: Separate center/right dialogues both survive:');
+  const center = {
+    x: 410, y: 32, w: 101, h: 199, direction: 'vertical',
+    text: 'お前の母親に童貞奪われるところなんて…!',
+  };
+  const right = {
+    x: 648, y: 24, w: 58, h: 212, direction: 'vertical',
+    text: '吉原…見ないでくれ…!',
+  };
+  const kept = removeCoveredNarrowVerticalFragments([center, right]);
+  assert.strictEqual(kept.length, 2,
+    'Center and right are separate dialogues and must both survive final deduplication');
+  assert.ok(kept.some((b) => b.w === 101));
+  assert.ok(kept.some((b) => b.w === 58));
+  console.log('  ✓ Center/right separation preserved by the final fragment filter');
+}
+
+console.log('\nAll 23 Unit Tests Passed Successfully!\n');

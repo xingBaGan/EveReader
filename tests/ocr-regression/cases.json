@@ -1,0 +1,11 @@
+{
+  "description": "Manually reviewed text anchors; regions are normalized [x,y,w,h] in inputs. Not a complete page transcription.",
+  "cases": [
+    {"image":"page19.png","id":"p19-short-kana","text":"嫌だ","region":[0.29,0.04,0.08,0.06]},
+    {"image":"page20.png","id":"p20-missing-short-vertical","text":"…はい♡","region":[0.18,0.35,0.11,0.15],"knownIssue":"Previously read as い♡; currently missing from final overlay."},
+    {"image":"page20.png","id":"p20-long-bubble","text":"神子さんお手伝いお願いします","region":[0.66,0.40,0.15,0.23]},
+    {"image":"page20.png","id":"p20-narrow-bubble","text":"仕方ありませんね…♡","region":[0.81,0.32,0.12,0.24]},
+    {"image":"page20.png","id":"p20-green-short","text":"吉原…っ!","region":[0.14,0.77,0.09,0.12]},
+    {"image":"page21.png","id":"p21-tiny-punctuation","text":"ん!?","region":[0.46,0,0.12,0.09]}
+  ]
+}

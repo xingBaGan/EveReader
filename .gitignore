@@ -55,3 +55,9 @@ modules/*/ios/build/
 /.dsh/*
 /.claude/*
 /docs/*
+
+# OCR regression generated artifacts
+tests/ocr-regression/cases/*/annotate.html
+tests/ocr-regression/reports/
+tests/ocr-regression/runs/
+tests/ocr-regression/captures/

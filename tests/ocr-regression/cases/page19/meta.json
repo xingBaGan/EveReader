@@ -1,0 +1,14 @@
+{
+  "id": "page19",
+  "status": "approved",
+  "annotationStatus": "reviewed",
+  "note": "从旧锚点评测迁移；仅部分标注，不代表整页 ground truth。2026-11-07 补充顶部 #2/#5 重叠缺陷：中央与右侧应为两个独立文字块，不能合并或重复识别。",
+  "knownIssues": [
+    {
+      "id": "top-text-overlap",
+      "observed": "observed-overlap-2026-11-07.png",
+      "description": "#5 将中央和右侧对白合并为大框，#2 又重复识别右侧对白。"
+    }
+  ],
+  "approvedAt": "2026-11-07T02:10:54.683Z"
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "description": "Approved cases are included in device and offline regression runs.",
+  "cases": [
+    {
+      "id": "page19",
+      "status": "approved"
+    },
+    {
+      "id": "page20",
+      "status": "approved"
+    },
+    {
+      "id": "page21",
+      "status": "approved"
+    }
+  ],
+  "updatedAt": "2026-11-07T02:10:54.690Z"
+}

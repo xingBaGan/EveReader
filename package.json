@@ -54,7 +54,9 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "ocr:case": "node scripts/ocr-case.cjs",
+    "ocr:test": "node --test tests/ocr-regression/evaluator.test.cjs"
   },
   "private": true
 }
