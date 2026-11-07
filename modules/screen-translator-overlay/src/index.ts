@@ -857,6 +857,7 @@ export async function onnxCheckModel(): Promise<{
   ready: boolean;
   modelType: string;
   statusMessage: string;
+  activeModel?: string;
   installedFiles: string[];
   targetDirectory: string;
 }> {
@@ -888,7 +889,7 @@ export async function onnxCheckModel(): Promise<{
 export async function onnxTranslate(text: string): Promise<string> {
   if (!text || !text.trim()) return '';
   if (!NativeModule || typeof NativeModule.onnxTranslate !== 'function') {
-    return text;
+    throw new Error('此平台未接入离线翻译模块');
   }
   return await NativeModule.onnxTranslate(text);
 }
@@ -901,7 +902,7 @@ export async function onnxTranslateBatch(
 ): Promise<Record<string, string>> {
   if (Object.keys(items).length === 0) return {};
   if (!NativeModule || typeof NativeModule.onnxTranslateBatch !== 'function') {
-    return items;
+    throw new Error('此平台未接入离线翻译模块');
   }
   return await NativeModule.onnxTranslateBatch(items);
 }

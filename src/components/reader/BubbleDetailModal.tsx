@@ -5,29 +5,29 @@ import {
   Text,
   StyleSheet,
   Pressable,
-  Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, Copy, Check, MessageSquare, Sparkles, Volume2, Bookmark } from 'lucide-react-native';
+import { X, Copy, Check, MessageSquare, Sparkles, Volume2, Bookmark, RefreshCw } from 'lucide-react-native';
 import { TextBubble } from '../../types/manga';
-import { READER_THEMES } from '../../types/reader';
 import { useReaderStore } from '../../stores/useReaderStore';
 
 interface Props {
   bubble: TextBubble | null;
   visible: boolean;
   onClose: () => void;
+  onRetryTranslate?: (bubble: TextBubble) => void;
 }
 
 export const BubbleDetailModal: React.FC<Props> = ({
   bubble,
   visible,
   onClose,
+  onRetryTranslate,
 }) => {
   const [copied, setCopied] = React.useState(false);
   const insets = useSafeAreaInsets();
   const settings = useReaderStore((s) => s.settings);
-  const themeConfig = READER_THEMES[settings.theme] || READER_THEMES.light;
   const isDark = settings.theme === 'dark' || settings.theme === 'black';
 
   if (!bubble) return null;
@@ -141,12 +141,35 @@ export const BubbleDetailModal: React.FC<Props> = ({
             </View>
           </View>
 
-          {/* Target Translation (中文译文预览) */}
-          {bubble.targetText ? (
-            <View style={styles.section}>
+          {/* Target Translation (中文译文预览与状态) */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
               <Text style={[styles.sectionLabel, { color: isDark ? '#94a3b8' : '#64748b' }]}>
                 中文翻译参考
               </Text>
+              {bubble.translationStatus === 'translating' ? (
+                <View style={styles.translatingRow}>
+                  <ActivityIndicator size="small" color="#0284c7" />
+                  <Text style={[styles.translatingText, { color: '#0284c7' }]}>正在离线翻译…</Text>
+                </View>
+              ) : bubble.translationStatus === 'error' ? (
+                <Pressable
+                  style={styles.retryActionBtn}
+                  onPress={() => onRetryTranslate?.(bubble)}>
+                  <RefreshCw size={12} color="#ef4444" style={{ marginRight: 4 }} />
+                  <Text style={[styles.retryActionText, { color: '#ef4444' }]}>重试</Text>
+                </Pressable>
+              ) : !bubble.targetText ? (
+                <Pressable
+                  style={styles.retryActionBtn}
+                  onPress={() => onRetryTranslate?.(bubble)}>
+                  <RefreshCw size={12} color="#0284c7" style={{ marginRight: 4 }} />
+                  <Text style={[styles.retryActionText, { color: '#0284c7' }]}>开始翻译</Text>
+                </Pressable>
+              ) : null}
+            </View>
+
+            {bubble.targetText ? (
               <View
                 style={[
                   styles.textBox,
@@ -160,8 +183,51 @@ export const BubbleDetailModal: React.FC<Props> = ({
                   {bubble.targetText}
                 </Text>
               </View>
-            </View>
-          ) : null}
+            ) : bubble.translationStatus === 'translating' ? (
+              <View
+                style={[
+                  styles.textBox,
+                  {
+                    backgroundColor: isDark ? '#27292d' : '#f8fafc',
+                    borderColor: isDark ? '#374151' : '#e2e8f0',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    paddingVertical: 14,
+                  },
+                ]}>
+                <ActivityIndicator size="small" color="#0284c7" />
+                <Text style={{ marginTop: 6, fontSize: 13, color: isDark ? '#94a3b8' : '#64748b' }}>
+                  正在离线翻译…
+                </Text>
+              </View>
+            ) : bubble.translationStatus === 'error' ? (
+              <View
+                style={[
+                  styles.textBox,
+                  {
+                    backgroundColor: isDark ? 'rgba(239, 68, 68, 0.12)' : 'rgba(239, 68, 68, 0.06)',
+                    borderColor: '#ef4444',
+                  },
+                ]}>
+                <Text style={{ fontSize: 13, color: '#ef4444' }}>
+                  {bubble.translationError || '离线模型推理失败，可点击右上角重试'}
+                </Text>
+              </View>
+            ) : (
+              <View
+                style={[
+                  styles.textBox,
+                  {
+                    backgroundColor: isDark ? '#27292d' : '#f8fafc',
+                    borderColor: isDark ? '#374151' : '#e2e8f0',
+                  },
+                ]}>
+                <Text style={{ fontSize: 13, color: isDark ? '#64748b' : '#94a3b8' }}>
+                  未获取到中文译文。点击右上角【开始翻译】发起离线翻译。
+                </Text>
+              </View>
+            )}
+          </View>
 
           {/* Notes / Tips */}
           {bubble.notes ? (
@@ -267,6 +333,27 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   copyBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  translatingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  translatingText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  retryActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    backgroundColor: 'rgba(100, 116, 139, 0.12)',
+  },
+  retryActionText: {
     fontSize: 12,
     fontWeight: '600',
   },

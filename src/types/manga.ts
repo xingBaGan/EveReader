@@ -35,6 +35,8 @@ export interface TextBubble {
   overlapOpacity?: number;
   isOverlapping?: boolean;
   chars?: CharBoxItem[];
+  translationStatus?: 'idle' | 'translating' | 'translated' | 'error';
+  translationError?: string;
 }
 
 export interface MangaPage {

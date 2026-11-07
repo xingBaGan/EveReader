@@ -39,7 +39,8 @@ export class DeviceModelManager {
     }
     const files = onnxListModelFiles();
     const active = onnxGetActiveModel();
-    const installed = files.some((file) => file.name === pack.activeModelFileName);
+    const requiredFiles = [pack.activeModelFileName, 'decoder_int8.onnx', 'host_fp32.npz', 'tokenizer.json', 'joint.model', 'vocab.json', 'config.json'];
+    const installed = requiredFiles.every((name) => files.some((file) => file.name === name && file.sizeBytes > 0));
     const progress = onnxGetDownloadProgress();
     const installing =
       (progress.status === 'downloading' || progress.status === 'paused' || progress.status === 'extracting') &&
@@ -51,7 +52,7 @@ export class DeviceModelManager {
       pack,
       files,
       progress: installing ? progress : undefined,
-      state: active === pack.activeModelFileName
+      state: installed && active === pack.activeModelFileName
         ? 'active'
         : installing
           ? 'installing'
@@ -111,7 +112,11 @@ export class DeviceModelManager {
   async activate(id: DeviceTranslationModel): Promise<boolean> {
     const pack = getDeviceModelPack(id);
     const status = await this.getStatus(id);
-    if (status.state === 'active') return true;
+    if (status.state === 'active') {
+      const runtime = await onnxCheckModel();
+      if (runtime.ready && runtime.activeModel === pack.activeModelFileName) return true;
+      throw new Error(runtime.statusMessage || '离线模型初始化失败');
+    }
     if (status.state !== 'installed') {
       throw new Error(`模型 ${pack.displayName} 尚未安装`);
     }

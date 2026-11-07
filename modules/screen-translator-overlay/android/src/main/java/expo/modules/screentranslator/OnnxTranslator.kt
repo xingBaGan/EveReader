@@ -1,6 +1,5 @@
 package expo.modules.screentranslator
 
-import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
@@ -16,10 +15,11 @@ import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
-import java.io.BufferedReader
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStreamReader
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.nio.LongBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -30,9 +30,9 @@ import kotlin.math.min
 /**
  * ONNX Runtime 端侧本地漫画翻译推理引擎 (OnnxTranslator)
  * 特性：
- * 1. 基于 ONNX Runtime 跨平台高性能张量计算库 (onnxruntime-android:1.19.2)
- * 2. 支持端侧加载 Transformer / Seq2Seq 离线汉化模型 (如 Sakura-ONNX, Opus-MT-ONNX, Sugoi-ONNX)
- * 3. 自回归逐 Token 解码 + 自定义日中文本双向词表，专攻二次元漫画生肉汉化
+ * 1. 基于 ONNX Runtime 跨平台高性能张量计算库
+ * 2. 真实加载 JMangaTranslator-Fast v1 离线翻译包 (Fast int8 / Fast mixed)
+ * 3. ModernBERT-ja Unigram 分词 + Encoder 交叉注意力投影 + Decoder 自回归单步推理 + SentencePiece 中文反分词
  * 4. 0 网络请求、0 隐私泄露、完全离线毫秒级推理
  */
 object OnnxTranslator {
@@ -41,14 +41,16 @@ object OnnxTranslator {
   private const val PREFS_NAME = "expo_screen_translator_onnx"
   private const val KEY_ACTIVE_MODEL = "active_model_filename"
 
+  // 全局同步锁，串行化会话初始化、切换模型、单句推理、批量推理与释放
+  private val sessionLock = Any()
+
   private var ortEnv: OrtEnvironment? = null
-  private var translationSession: OrtSession? = null
   private var encoderSession: OrtSession? = null
   private var decoderSession: OrtSession? = null
 
-  // 词表与 Token 映射
-  private val srcVocabMap = HashMap<String, Long>(32000)
-  private val tgtVocabList = ArrayList<String>(32000)
+  private var fastTokenizer: FastTokenizer? = null
+  private var fastHostTensors: FastNpzReader? = null
+  private var fastSpDecoder: FastSentencePiece? = null
 
   @Volatile
   var isModelReady = false
@@ -59,7 +61,7 @@ object OnnxTranslator {
     private set
 
   @Volatile
-  var modelType: String = "none" // "seq2seq" | "single" | "encoder" | "none"
+  var modelType: String = "none" // "seq2seq" | "none"
     private set
 
   @Volatile
@@ -68,70 +70,6 @@ object OnnxTranslator {
 
   @Volatile
   var appContext: Context? = null
-
-  // 基础高频漫画拟声词与常用对白内置离线意译映射（在端侧模型推理前或作为强约束）
-  private val ACG_EXACT_MAP = mapOf(
-    "こんにちはぁ～♪" to "你好呀～♪",
-    "こんにちは～" to "你好呀～",
-    "今 幸せですか？" to "你现在幸福吗？",
-    "今幸せですか？" to "你现在幸福吗？",
-    "はーい 今出ます～" to "好—的，马上就出来～",
-    "はーい今出ます～" to "好—的，马上就出来～",
-    "迷えるアナタに 快楽の勧め…♥" to "致迷茫的你 快乐的邀约…♥",
-    "迷えるアナタに" to "致迷茫的你",
-    "快楽の勧め…♥" to "快乐的邀约…♥",
-    "訪問姦誘" to "上门诱惑",
-    "勧誘…" to "劝诱…",
-    "ボフッ" to "扑通",
-    "ガッ" to "咔",
-    "待て！お前、どこへ行く気だ？" to "等等！你打算去哪里？",
-    "フン、お前には関係ないだろう。" to "哼，这跟你没关系吧。",
-    "そんな冷たいこと言うなよ…！" to "别说这么冷淡的话啊…！",
-    "絶対に諦めたりしない！" to "我绝不会放弃！",
-    "信じてるぞ…お前の言葉を！" to "我相信你…相信你说的话！",
-    "お前…本気で言っているのか？" to "你…是认真的吗？",
-    "ああ、絶対に諦めたりしないさ！" to "啊，我绝不会轻言放弃的！",
-    "なんだ…これは…！？" to "这到底…是什么…！？",
-    "助けてくれ…！" to "救救我…！",
-    "助けて" to "救命！",
-    "噂だと その教団" to "据传闻 那个教团",
-    "噂だとその教団" to "据传闻 那个教团",
-    "何？" to "什么？",
-    "なに？" to "什么？",
-    "誰？" to "是谁？",
-    "誰だ？" to "是谁？！",
-    "どうして…" to "为什么…",
-    "なんで…" to "怎么会…",
-    "待って" to "等等我",
-    "待ってくれ" to "等等我！",
-    "行こう" to "走吧！",
-    "ダメ！" to "不行！",
-    "ダメだ" to "不行啊",
-    "やめて" to "快住手！",
-    "やめろ" to "住手！",
-    "痛い" to "好痛！",
-    "本当に？" to "真的吗？",
-    "ありがとう" to "谢谢你",
-    "ごめんなさい" to "对不起",
-    "すみません" to "抱歉",
-    "大丈夫" to "没问题",
-    "お願い" to "拜托了",
-    "すごい" to "好厉害！",
-    "バカ" to "笨蛋！",
-    "うるさい" to "吵死了！",
-    "好き" to "喜欢",
-    "さようなら" to "再见",
-    "わかった" to "明白了",
-    "知らない" to "不知道",
-    "まさか…" to "难道说…",
-    "危ない！" to "危险！",
-    "信じられない" to "不敢相信…",
-    "ちょっと待って" to "稍等一下",
-    "そうか" to "这样啊",
-    "なるほど" to "原来如此",
-    "うそ…" to "骗人的吧…",
-    "嘘…" to "骗人…"
-  )
 
   /**
    * 获取用户当前指定的生效模型文件名
@@ -144,175 +82,222 @@ object OnnxTranslator {
   /**
    * 自主切换当前生效的端侧翻译模型并重新加载会话
    */
-  @Synchronized
-  fun setActiveModel(context: Context, modelFileName: String): Boolean {
+  fun setActiveModel(context: Context, modelFileName: String): Boolean = synchronized(sessionLock) {
     val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     prefs.edit().putString(KEY_ACTIVE_MODEL, modelFileName).apply()
-    close()
-    return init(context)
+    closeInternal()
+    return initInternal(context)
   }
 
   /**
    * 初始化 ONNX Runtime 翻译模型运行环境
    */
-  @Synchronized
-  fun init(context: Context): Boolean {
-    if (isModelReady && (translationSession != null || encoderSession != null)) {
+  fun init(context: Context): Boolean = synchronized(sessionLock) {
+    return initInternal(context)
+  }
+
+  private fun initInternal(context: Context): Boolean {
+    if (isModelReady && encoderSession != null && decoderSession != null &&
+      fastTokenizer != null && fastHostTensors != null && fastSpDecoder != null) {
       return true
     }
     appContext = context.applicationContext
+
+    val sessionOptions = OrtSession.SessionOptions().apply {
+      setInterOpNumThreads(1)
+      setIntraOpNumThreads(min(4, Runtime.getRuntime().availableProcessors()))
+      setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+    }
+
+    var newEncSession: OrtSession? = null
+    var newDecSession: OrtSession? = null
 
     return try {
       statusMessage = "⏳ 正在初始化 ONNX Runtime 翻译模型环境..."
       val env = OrtEnvironment.getEnvironment()
       ortEnv = env
 
-      val sessionOptions = OrtSession.SessionOptions().apply {
-        setInterOpNumThreads(2)
-        setIntraOpNumThreads(2)
-      }
-
-      // 1. 查找模型权重：优先检查应用数据目录 filesDir/models/translation/
       val modelDir = File(context.filesDir, "models/translation")
       if (!modelDir.exists()) {
         modelDir.mkdirs()
       }
 
-      // 加载词表
-      loadVocab(context, modelDir)
-
-      // 2. 获取用户偏好的生效模型
       val userPreferredName = getActiveModelFileName(context)
-      var targetFile: File? = if (userPreferredName.isNotBlank()) File(modelDir, userPreferredName) else null
+      val resolvedFiles = resolveModelPackFiles(modelDir, userPreferredName)
 
-      // 如果未指定生效模型或指定文件不存在，则从本地模型目录中自动探测可用的 .onnx 文件
-      if (targetFile == null || !targetFile.exists() || targetFile.length() <= 1024) {
-        val availableFiles = modelDir.listFiles()?.filter {
-          it.isFile && it.extension.equals("onnx", ignoreCase = true) && !it.name.endsWith(".download") && it.length() > 1024
-        }?.sortedByDescending { it.lastModified() }
-
-        if (!availableFiles.isNullOrEmpty()) {
-          targetFile = availableFiles.first()
-          val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-          prefs.edit().putString(KEY_ACTIVE_MODEL, targetFile.name).apply()
-        }
-      }
-
-      // 如果本地下载目录暂无模型，检查 assets 预置模型回退
-      if (targetFile == null || !targetFile.exists() || targetFile.length() <= 1024) {
-        targetFile = findModelFile(context, listOf(
-          File(modelDir, "opus_mt_encoder.onnx"),
-          File(modelDir, "translator_encoder.onnx"),
-          File(modelDir, "translation_model.onnx"),
-          File(modelDir, "sakura_model.onnx"),
-          File(modelDir, "translator.onnx")
-        ), listOf("models/translation_model.onnx", "models/translator.onnx", "models/translator_encoder.onnx"))
-      }
-
-      if (targetFile != null && targetFile.exists() && targetFile.length() > 1024) {
-        val fName = targetFile.name
-        Log.i(TAG, "Loading selected ONNX translation model: ${targetFile.absolutePath}")
-
-        if (fName.contains("encoder", ignoreCase = true)) {
-          encoderSession = env.createSession(targetFile.absolutePath, sessionOptions)
-          val decFile = File(modelDir, fName.replace("encoder", "decoder"))
-          if (decFile.exists() && decFile.length() > 1024) {
-            decoderSession = env.createSession(decFile.absolutePath, sessionOptions)
-            modelType = "seq2seq"
-          } else {
-            modelType = "encoder"
-          }
-        } else {
-          translationSession = env.createSession(targetFile.absolutePath, sessionOptions)
-          modelType = "single"
-        }
-
-        activeModelName = fName
-        isModelReady = true
-        statusMessage = "✅ ONNX 翻译模型就绪 ($fName)"
-        return true
-      } else {
-        // 模型文件尚未就绪
+      if (resolvedFiles == null) {
         isModelReady = false
         activeModelName = null
         modelType = "none"
-        statusMessage = "⚠️ 尚未导入 ONNX 翻译权重 (请在离线模型库中选择下载)"
+        statusMessage = "⚠️ 缺少必需的 Fast v1 翻译模型文件 (需包含 encoder/decoder/host/tokenizer/vocab/joint)"
         Log.w(TAG, statusMessage)
         return false
       }
+
+      val encFile = resolvedFiles["encoder"]!!
+      val decFile = resolvedFiles["decoder"]!!
+      val hostFile = resolvedFiles["host"]!!
+      val tokFile = resolvedFiles["tokenizer"]!!
+      val jointFile = resolvedFiles["joint"]!!
+      val vocabFile = resolvedFiles["vocab"]!!
+      val cfgFile = resolvedFiles["config"]!!
+
+      Log.i(TAG, "加载 Fast v1 翻译模型权重: enc=${encFile.name}, dec=${decFile.name}")
+
+      newEncSession = env.createSession(encFile.absolutePath, sessionOptions)
+      newDecSession = env.createSession(decFile.absolutePath, sessionOptions)
+
+      val newTokenizer = FastTokenizer().apply {
+        tokFile.inputStream().use { load(it) }
+      }
+      val newHost = FastNpzReader().apply {
+        load(hostFile)
+      }
+      val newSp = FastSentencePiece().apply {
+        load(jointFile, vocabFile, cfgFile)
+      }
+
+      // 释放先前旧会话 (保留全局 ortEnv，不 close 全局 env)
+      encoderSession?.close()
+      decoderSession?.close()
+
+      encoderSession = newEncSession
+      decoderSession = newDecSession
+      fastTokenizer = newTokenizer
+      fastHostTensors = newHost
+      fastSpDecoder = newSp
+
+      // 成功转移所有权
+      newEncSession = null
+      newDecSession = null
+
+      activeModelName = encFile.name
+      modelType = "seq2seq"
+      isModelReady = true
+      statusMessage = "✅ Fast v1 翻译模型就绪 (${encFile.name})"
+
+      val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+      prefs.edit().putString(KEY_ACTIVE_MODEL, encFile.name).apply()
+
+      Log.i(TAG, statusMessage)
+      true
     } catch (e: Exception) {
       val err = "初始化 ONNX 翻译模型失败: ${e.message}"
       Log.e(TAG, err, e)
       statusMessage = "❌ $err"
       isModelReady = false
       activeModelName = null
+      modelType = "none"
+      newEncSession?.close()
+      newDecSession?.close()
+      encoderSession?.close()
+      decoderSession?.close()
+      encoderSession = null
+      decoderSession = null
+      fastTokenizer = null
+      fastHostTensors = null
+      fastSpDecoder = null
       false
-    }
-  }
-
-  private fun findModelFile(context: Context, fileCandidates: List<File>, assetCandidates: List<String>): File? {
-    for (f in fileCandidates) {
-      if (f.exists() && f.length() > 1024) return f
-    }
-    for (asset in assetCandidates) {
+    } finally {
       try {
-        context.assets.open(asset).use {
-          val dest = File(context.filesDir, File(asset).name)
-          if (!dest.exists() || dest.length() != it.available().toLong()) {
-            copyAssetToFile(context, asset, dest)
-          }
-          if (dest.exists()) return dest
-        }
-      } catch (e: Exception) {}
+        sessionOptions.close()
+      } catch (_: Exception) {}
     }
-    return null
   }
 
-  private fun copyAssetToFile(context: Context, assetPath: String, dest: File) {
-    try {
-      context.assets.open(assetPath).use { input ->
-        FileOutputStream(dest).use { output ->
-          input.copyTo(output)
-        }
+  private fun resolveModelPackFiles(modelDir: File, preferredModelName: String): Map<String, File>? {
+    val searchDirs = ArrayList<File>()
+    searchDirs.add(modelDir)
+    modelDir.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") }?.forEach {
+      searchDirs.add(it)
+    }
+
+    for (dir in searchDirs) {
+      val encoderCandidates = if (preferredModelName.isNotBlank()) {
+        listOf(
+          File(dir, preferredModelName),
+          File(dir, "onnx/$preferredModelName"),
+          File(modelDir, preferredModelName),
+          File(modelDir, "onnx/$preferredModelName")
+        )
+      } else {
+        listOf(
+          File(dir, "encoder_int8.onnx"),
+          File(dir, "onnx/encoder_int8.onnx"),
+          File(dir, "encoder_int4.onnx"),
+          File(dir, "onnx/encoder_int4.onnx"),
+          File(modelDir, "encoder_int8.onnx"),
+          File(modelDir, "onnx/encoder_int8.onnx"),
+          File(modelDir, "encoder_int4.onnx"),
+          File(modelDir, "onnx/encoder_int4.onnx")
+        )
       }
-    } catch (e: Exception) {
-      Log.e(TAG, "Failed copying asset $assetPath", e)
-    }
-  }
 
-  private fun loadVocab(context: Context, modelDir: File) {
-    if (tgtVocabList.isNotEmpty()) return
-    try {
-      val vocabFile = File(modelDir, "translation_vocab.txt")
-      var stream: java.io.InputStream? = if (vocabFile.exists()) vocabFile.inputStream() else null
+      val encFile = encoderCandidates.firstOrNull { it.exists() && it.length() > 1024 } ?: continue
 
-      if (stream == null) {
-        val candidates = listOf("models/translation_vocab.txt", "translation_vocab.txt", "models/manga_ocr_vocab.txt")
-        for (c in candidates) {
+      // Fast int8 与 Fast mixed 共用同一个 decoder_int8.onnx
+      val decCandidates = listOf(
+        File(dir, "decoder_int8.onnx"),
+        File(dir, "onnx/decoder_int8.onnx"),
+        File(modelDir, "decoder_int8.onnx"),
+        File(modelDir, "onnx/decoder_int8.onnx")
+      )
+      val decFile = decCandidates.firstOrNull { it.exists() && it.length() > 1024 } ?: continue
+
+      val hostCandidates = listOf(
+        File(dir, "host_fp32.npz"),
+        File(dir, "onnx/host_fp32.npz"),
+        File(modelDir, "host_fp32.npz"),
+        File(modelDir, "onnx/host_fp32.npz")
+      )
+      val hostFile = hostCandidates.firstOrNull { it.exists() && it.length() > 1024 } ?: continue
+
+      val tokCandidates = listOf(
+        File(dir, "tokenizer.json"),
+        File(dir, "tokenizer/tokenizer.json"),
+        File(modelDir, "tokenizer.json"),
+        File(modelDir, "tokenizer/tokenizer.json")
+      )
+      val tokFile = tokCandidates.firstOrNull { it.exists() && it.length() > 1024 } ?: continue
+
+      val jointCandidates = listOf(
+        File(dir, "joint.model"),
+        File(modelDir, "joint.model")
+      )
+      val jointFile = jointCandidates.firstOrNull { it.exists() && it.length() > 1024 } ?: continue
+
+      val vocabCandidates = listOf(
+        File(dir, "vocab.json"),
+        File(modelDir, "vocab.json")
+      )
+      val vocabFile = vocabCandidates.firstOrNull { it.exists() && it.length() > 1024 } ?: continue
+
+      val cfgCandidates = listOf(
+        File(dir, "config.json"),
+        File(modelDir, "config.json")
+      )
+      val cfgFile = cfgCandidates.firstOrNull { f ->
+        if (!f.exists() || f.length() <= 10) false
+        else {
           try {
-            stream = context.assets.open(c)
-            break
-          } catch (e: Exception) {}
+            val txt = f.readText(Charsets.UTF_8)
+            txt.contains("jmangatranslator", ignoreCase = true) || txt.contains("dec_layers")
+          } catch (_: Exception) { false }
         }
-      }
+      } ?: continue
 
-      if (stream != null) {
-        BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
-          var line = reader.readLine()
-          var idx = 0L
-          while (line != null) {
-            val token = line.trim('\r', '\n')
-            srcVocabMap[token] = idx
-            tgtVocabList.add(token)
-            idx++
-            line = reader.readLine()
-          }
-        }
-        Log.i(TAG, "Loaded ${tgtVocabList.size} tokens for ONNX Translator")
-      }
-    } catch (e: Exception) {
-      Log.e(TAG, "Failed to load translation vocab", e)
+      return mapOf(
+        "encoder" to encFile,
+        "decoder" to decFile,
+        "host" to hostFile,
+        "tokenizer" to tokFile,
+        "joint" to jointFile,
+        "vocab" to vocabFile,
+        "config" to cfgFile
+      )
     }
+
+    return null
   }
 
   /**
@@ -337,168 +322,303 @@ object OnnxTranslator {
   }
 
   /**
-   * 单句 ONNX 端侧本地翻译推理
+   * 单句 ONNX 端侧本地翻译推理 (真实神经网络自回归，禁止假硬编码)
    */
-  fun translate(rawText: String): String {
+  fun translate(rawText: String): String = synchronized(sessionLock) {
     val text = rawText.trim()
     if (text.isEmpty()) return ""
 
-    // 1. 优先命中高精度二次元漫画核心对白预置缓存
-    if (ACG_EXACT_MAP.containsKey(text)) {
-      return ACG_EXACT_MAP[text]!!
-    }
-
     val ctx = appContext
     if (ctx != null && !isModelReady) {
-      init(ctx)
+      initInternal(ctx)
     }
 
-    val env = ortEnv
-    val sess = translationSession ?: encoderSession
-
-    // 2. 如果 ONNX 模型文件已正确加载，执行本地神经网络张量自回归推理
-    if (isModelReady && env != null && sess != null) {
-      try {
-        val result = runOnnxInference(text, env, sess)
-        if (result.isNotBlank()) {
-          return result
-        }
-      } catch (e: Exception) {
-        Log.e(TAG, "ONNX 推理执行失败，降级为本地规则意译", e)
-      }
+    if (!isModelReady || encoderSession == null || decoderSession == null ||
+      fastTokenizer == null || fastHostTensors == null || fastSpDecoder == null) {
+      throw IllegalStateException("ONNX 翻译模型尚未就绪: $statusMessage")
     }
 
-    // 3. 降级：如果未放入实际 ONNX 权重或推理遇到未登录词，应用二次元高鲁棒意译推导
-    return fallbackHeuristicTranslate(text)
+    val env = ortEnv ?: throw IllegalStateException("OrtEnvironment 未初始化")
+    val encSess = encoderSession ?: throw IllegalStateException("EncoderSession 为空")
+    val decSess = decoderSession ?: throw IllegalStateException("DecoderSession 为空")
+    val tok = fastTokenizer ?: throw IllegalStateException("Tokenizer 为空")
+    val host = fastHostTensors ?: throw IllegalStateException("HostTensors 为空")
+    val sp = fastSpDecoder ?: throw IllegalStateException("SentencePieceDecoder 为空")
+
+    return runOnnxInference(text, env, encSess, decSess, tok, host, sp)
   }
 
   /**
-   * 执行真实 ONNX 模型推理
-   */
-  private fun runOnnxInference(text: String, env: OrtEnvironment, session: OrtSession): String {
-    // 字符/Subword 分词转 Token IDs
-    val tokens = tokenizeText(text)
-    if (tokens.isEmpty()) return text
-
-    val seqLen = tokens.size.toLong()
-    val inputIdsBuffer = LongBuffer.wrap(tokens)
-    val inputIdsTensor = OnnxTensor.createTensor(env, inputIdsBuffer, longArrayOf(1, seqLen))
-
-    val attentionMaskBuffer = LongBuffer.wrap(LongArray(tokens.size) { 1L })
-    val attentionMaskTensor = OnnxTensor.createTensor(env, attentionMaskBuffer, longArrayOf(1, seqLen))
-
-    val inputNames = session.inputNames
-    val inputs = HashMap<String, OnnxTensor>()
-
-    if (inputNames.contains("input_ids")) inputs["input_ids"] = inputIdsTensor
-    else if (inputNames.isNotEmpty()) inputs[inputNames.first()] = inputIdsTensor
-
-    if (inputNames.contains("attention_mask")) inputs["attention_mask"] = attentionMaskTensor
-
-    val results = session.run(inputs)
-
-    // 解析输出 logits 或生成的 token_ids
-    val outputName = session.outputNames.firstOrNull() ?: return text
-    val outputTensor = results.get(outputName).orElse(null) as? OnnxTensor ?: return text
-
-    val generatedText = detokenizeTensor(outputTensor)
-
-    inputIdsTensor.close()
-    attentionMaskTensor.close()
-    results.close()
-
-    return if (generatedText.isNotBlank()) generatedText else text
-  }
-
-  private fun tokenizeText(text: String): LongArray {
-    val list = ArrayList<Long>()
-    list.add(101L) // [BOS] / [CLS]
-    for (ch in text) {
-      val str = ch.toString()
-      val id = srcVocabMap[str] ?: (ch.code.toLong() % 30000L + 1000L)
-      list.add(id)
-    }
-    list.add(102L) // [EOS] / [SEP]
-    return list.toLongArray()
-  }
-
-  private fun detokenizeTensor(tensor: OnnxTensor): String {
-    try {
-      val info = tensor.info
-      if (info.type == OnnxJavaType.INT64) {
-        val buf = tensor.longBuffer
-        val sb = StringBuilder()
-        while (buf.hasRemaining()) {
-          val id = buf.get().toInt()
-          if (id in tgtVocabList.indices) {
-            val word = tgtVocabList[id]
-            if (word != "[PAD]" && word != "[CLS]" && word != "[SEP]" && word != "[UNK]") {
-              sb.append(word)
-            }
-          }
-        }
-        return sb.toString().trim()
-      }
-    } catch (e: Exception) {
-      Log.e(TAG, "Detokenize failed", e)
-    }
-    return ""
-  }
-
-  /**
-   * 降级与二次元漫画拟声词/口语启发式翻译
-   */
-  private fun fallbackHeuristicTranslate(text: String): String {
-    for ((k, v) in ACG_EXACT_MAP) {
-      if (text.contains(k)) {
-        return text.replace(k, v)
-      }
-    }
-    // 拟声词与常见终助词匹配
-    if (text.contains("ッ") || text.contains("ガッ") || text.contains("ボフ")) return "咚！"
-    if (text.contains("シーン") || text.contains("……")) return "……"
-    if (text.endsWith("のか？") || text.endsWith("のか?")) return text.substring(0, text.length - 3) + "的吗？"
-    if (text.endsWith("か？") || text.endsWith("か?")) return text.substring(0, text.length - 2) + "吗？"
-    if (text.endsWith("よ！") || text.endsWith("わ！") || text.endsWith("ぞ！")) return text.substring(0, text.length - 2) + "啊！"
-    if (text.endsWith("ね…") || text.endsWith("ね~")) return text.substring(0, text.length - 2) + "呢…"
-
-    return text
-  }
-
-  /**
-   * 批量端侧离线翻译 (全屏气泡协程并发)
+   * 批量端侧离线翻译 (全屏气泡顺序推理，严格映射 ID)
    */
   suspend fun translateBatch(items: Map<String, String>): Map<String, String> = withContext(Dispatchers.IO) {
     if (items.isEmpty()) return@withContext emptyMap<String, String>()
 
-    val ctx = appContext
-    if (ctx != null && !isModelReady) {
-      init(ctx)
-    }
+    synchronized(sessionLock) {
+      val ctx = appContext
+      if (ctx != null && !isModelReady) {
+        initInternal(ctx)
+      }
 
-    coroutineScope {
-      val deferreds = items.map { (id, text) ->
-        id to async {
-          translate(text)
+      if (!isModelReady) {
+        throw IllegalStateException("ONNX 翻译模型尚未就绪: $statusMessage")
+      }
+
+      val resultMap = LinkedHashMap<String, String>(items.size)
+      for ((id, text) in items) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) {
+          resultMap[id] = ""
+        } else {
+          resultMap[id] = translate(trimmed)
         }
       }
-      deferreds.associate { (id, deferred) -> id to deferred.await() }
+      resultMap
     }
   }
 
   /**
-   * 释放底层 ONNX 会话资源
+   * 执行真实 ONNX 编码器 + 步进解码器自回归推理
    */
-  fun close() {
+  private fun runOnnxInference(
+    text: String,
+    env: OrtEnvironment,
+    encoderSession: OrtSession,
+    decoderSession: OrtSession,
+    tokenizer: FastTokenizer,
+    host: FastNpzReader,
+    spDecoder: FastSentencePiece
+  ): String {
+    // 1. 日文 Unigram 分词转 Token IDs (含 <s>=1, </s>=2, 截断至 128)
+    val tokenIds = tokenizer.encode(text)
+    val n = tokenIds.size
+    val seqLen = n.toLong()
+
+    // 2. Encoder 前向计算
+    val inputIdsBuffer = LongBuffer.wrap(tokenIds)
+    val inputIdsTensor = OnnxTensor.createTensor(env, inputIdsBuffer, longArrayOf(1, seqLen))
+
+    val encOutputs = try {
+      encoderSession.run(mapOf("ids" to inputIdsTensor))
+    } finally {
+      inputIdsTensor.close()
+    }
+
+    val H = host.heads // 12
+    val hd = host.headDim // 64
+    val dim = host.dim // 768
+    val T = 128
+    val M = 130 // 2 + 128
+    val vocabSize = host.vocabSize // 22935
+    val negVal = -1e4f
+
+    // 3. 提取并填充 Cross-Attention 张量 (ck0, cv0, ck1, cv1) 至固定长度 M=130
+    val crossNames = arrayOf("ck0", "cv0", "ck1", "cv1")
+    val crossBuffers = HashMap<String, FloatBuffer>()
+    val crossTensors = HashMap<String, OnnxTensor>()
+    var cmaskTensor: OnnxTensor? = null
+
     try {
-      translationSession?.close()
+      for (crossName in crossNames) {
+        val tensor = encOutputs.get(crossName).orElse(null) as? OnnxTensor
+          ?: throw IllegalStateException("Encoder 缺少输出张量: $crossName")
+        val encFloatBuf = tensor.floatBuffer
+
+        val totalCrossFloats = 1 * H * M * hd
+        val paddedBuf = ByteBuffer.allocateDirect(totalCrossFloats * 4)
+          .order(ByteOrder.nativeOrder())
+          .asFloatBuffer()
+
+        // 复制前 2 + n 个位置 (包含 2 个 null token 与 n 个源 token)
+        val srcPositions = 2 + n
+        for (h in 0 until H) {
+          for (s in 0 until srcPositions) {
+            val srcOffset = (h * srcPositions + s) * hd
+            val dstOffset = (h * M + s) * hd
+            for (d in 0 until hd) {
+              paddedBuf.put(dstOffset + d, encFloatBuf.get(srcOffset + d))
+            }
+          }
+        }
+        paddedBuf.position(0)
+        crossBuffers[crossName] = paddedBuf
+        crossTensors[crossName] = OnnxTensor.createTensor(
+          env,
+          paddedBuf,
+          longArrayOf(1, H.toLong(), M.toLong(), hd.toLong())
+        )
+      }
+      encOutputs.close()
+
+      // 4. 构建 cmask 张量 [1, 1, 1, M]
+      val cmaskBuf = ByteBuffer.allocateDirect(M * 4)
+        .order(ByteOrder.nativeOrder())
+        .asFloatBuffer()
+      val srcCount = 2 + n
+      for (m in 0 until M) {
+        cmaskBuf.put(m, if (m < srcCount) 0.0f else negVal)
+      }
+      cmaskBuf.position(0)
+      cmaskTensor = OnnxTensor.createTensor(env, cmaskBuf, longArrayOf(1, 1, 1, M.toLong()))
+
+      // 5. 初始化自注意力 KV-Cache [1, H, T, hd] (初始全 0.0)
+      val cacheNames = arrayOf("kc0", "vc0", "kc1", "vc1")
+      val stepKNames = arrayOf("k0", "v0", "k1", "v1")
+      val cacheFloats = 1 * H * T * hd
+      val cacheBuffers = HashMap<String, FloatBuffer>()
+      for (cName in cacheNames) {
+        val buf = ByteBuffer.allocateDirect(cacheFloats * 4)
+          .order(ByteOrder.nativeOrder())
+          .asFloatBuffer()
+        cacheBuffers[cName] = buf
+      }
+
+      // 6. 初始化 smask [1, 1, 1, T] (初始全 -1e4f)
+      val smaskBuf = ByteBuffer.allocateDirect(T * 4)
+        .order(ByteOrder.nativeOrder())
+        .asFloatBuffer()
+      for (t in 0 until T) {
+        smaskBuf.put(t, negVal)
+      }
+      smaskBuf.position(0)
+
+      val xDirectBuf = ByteBuffer.allocateDirect(dim * 4)
+        .order(ByteOrder.nativeOrder())
+        .asFloatBuffer()
+
+      val outTokens = ArrayList<Int>()
+      var prev1 = -1
+      var prev2 = -1
+      var currentTok = 1 // BOS
+
+      val maxSteps = minOf(3 * n + 10, 512, T + 1)
+      val logitsArray = FloatArray(vocabSize)
+
+      for (t in 0 until maxSteps) {
+        // x = scaledEmb[currentTok] + pos[t]
+        xDirectBuf.clear()
+        val embOffset = currentTok * dim
+        val posOffset = t * dim
+        for (d in 0 until dim) {
+          xDirectBuf.put(d, host.scaledEmb[embOffset + d] + host.pos[posOffset + d])
+        }
+        xDirectBuf.position(0)
+
+        val xTensor = OnnxTensor.createTensor(env, xDirectBuf, longArrayOf(1, 1, dim.toLong()))
+        smaskBuf.position(0)
+        val smaskTensor = OnnxTensor.createTensor(env, smaskBuf, longArrayOf(1, 1, 1, T.toLong()))
+
+        val cacheTensors = HashMap<String, OnnxTensor>()
+        for (cName in cacheNames) {
+          cacheBuffers[cName]!!.position(0)
+          cacheTensors[cName] = OnnxTensor.createTensor(
+            env,
+            cacheBuffers[cName]!!,
+            longArrayOf(1, H.toLong(), T.toLong(), hd.toLong())
+          )
+        }
+
+        val stepInputs = HashMap<String, OnnxTensor>()
+        stepInputs["x"] = xTensor
+        stepInputs["smask"] = smaskTensor
+        stepInputs["cmask"] = cmaskTensor
+        for ((k, tensor) in crossTensors) stepInputs[k] = tensor
+        for ((k, tensor) in cacheTensors) stepInputs[k] = tensor
+
+        val decOutputs = try {
+          decoderSession.run(stepInputs)
+        } finally {
+          xTensor.close()
+          smaskTensor.close()
+          for (tns in cacheTensors.values) tns.close()
+        }
+
+        val nxtToken = try {
+          val logitsTensor = decOutputs.get("logits").orElse(null) as? OnnxTensor
+            ?: throw IllegalStateException("Decoder 缺少 logits 输出")
+          val floatBuf = logitsTensor.floatBuffer
+          floatBuf.get(logitsArray)
+
+          // 应用假名屏蔽规则，防止 byte-fallback 拼凑日文
+          spDecoder.applyKanaRules(logitsArray, prev1, prev2)
+
+          var maxVal = -Float.MAX_VALUE
+          var argMax = 0
+          for (v in 0 until vocabSize) {
+            if (logitsArray[v] > maxVal) {
+              maxVal = logitsArray[v]
+              argMax = v
+            }
+          }
+
+          if (t < T) {
+            for (ci in 0 until 4) {
+              val cName = cacheNames[ci]
+              val kName = stepKNames[ci]
+              val newTensor = decOutputs.get(kName).orElse(null) as? OnnxTensor
+                ?: throw IllegalStateException("Decoder 缺少缓存输出: $kName")
+              run {
+                val newBuf = newTensor.floatBuffer
+                val cBuf = cacheBuffers[cName]!!
+                for (h in 0 until H) {
+                  val srcOffset = h * hd
+                  val dstOffset = (h * T + t) * hd
+                  for (d in 0 until hd) {
+                    cBuf.put(dstOffset + d, newBuf.get(srcOffset + d))
+                  }
+                }
+              }
+            }
+            smaskBuf.put(t, 0.0f)
+          }
+
+          argMax
+        } finally {
+          decOutputs.close()
+        }
+
+        if (nxtToken == 2 || nxtToken == 3) { // EOS 或 PAD
+          break
+        }
+
+        outTokens.add(nxtToken)
+        prev2 = prev1
+        prev1 = nxtToken
+        currentTok = nxtToken
+      }
+
+      // 7. SentencePiece 真实反分词还原为中文
+      val translated = spDecoder.decode(outTokens)
+      check(translated.isNotBlank()) { "离线模型未生成译文" }
+      return translated
+    } finally {
+      encOutputs.close()
+      cmaskTensor?.close()
+      for (tns in crossTensors.values) {
+        try { tns.close() } catch (_: Exception) {}
+      }
+    }
+  }
+
+  /**
+   * 释放底层 ONNX 会话资源 (不释放全局共享的 ortEnv)
+   */
+  fun close() = synchronized(sessionLock) {
+    closeInternal()
+  }
+
+  private fun closeInternal() {
+    try {
       encoderSession?.close()
       decoderSession?.close()
-    } catch (e: Exception) {}
-    translationSession = null
+    } catch (_: Exception) {}
     encoderSession = null
     decoderSession = null
+    fastTokenizer = null
+    fastHostTensors = null
+    fastSpDecoder = null
     isModelReady = false
+    statusMessage = "未初始化"
   }
 
   // ==================== 离线模型自主下载与文件管理模块 ====================
