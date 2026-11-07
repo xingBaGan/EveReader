@@ -1,0 +1,100 @@
+{
+  "imageWidth": 860,
+  "imageHeight": 1214,
+  "partial": true,
+  "allowEmpty": false,
+  "bubbles": [
+    {
+      "id": "p9-narration",
+      "box": [
+        0.6104999999999999,
+        0.1466,
+        0.0663,
+        0.19190000000000002
+      ],
+      "text": "もし母親のせいで吉原が苦しんでるなら…",
+      "direction": "vertical",
+      "textType": "free_text",
+      "ignore": false
+    },
+    {
+      "id": "p9-upper-caption",
+      "box": [
+        0.7918999999999999,
+        0.18780000000000002,
+        0.0395,
+        0.12689999999999999
+      ],
+      "text": "上げてしまった…",
+      "direction": "vertical",
+      "textType": "free_text",
+      "ignore": false
+    },
+    {
+      "id": "p9-bottom-dialogue",
+      "box": [
+        0.7034999999999999,
+        0.8468000000000001,
+        0.0395,
+        0.1417
+      ],
+      "text": "罪を償うことがー",
+      "direction": "vertical",
+      "textType": "bubble",
+      "ignore": false
+    },
+    {
+      "id": "p9-duplicate-sentence",
+      "box": [
+        0.6826000000000001,
+        0.0717,
+        0.0953,
+        0.18530000000000002
+      ],
+      "text": "いやこれはあの変な噂が本当かどうか確認するため…",
+      "direction": "vertical",
+      "textType": "free_text",
+      "ignore": false
+    },
+    {
+      "id": "p9-long-caption",
+      "box": [
+        0.5372,
+        0.25120000000000003,
+        0.0674,
+        0.1409
+      ],
+      "text": "オレが吉原を守ってやりたい…!",
+      "direction": "vertical",
+      "textType": "free_text",
+      "ignore": false
+    },
+    {
+      "id": "p9-lower-caption",
+      "box": [
+        0.48840000000000006,
+        0.7842,
+        0.0814,
+        0.1837
+      ],
+      "text": "吉原…やっぱかわいいな…",
+      "direction": "vertical",
+      "textType": "free_text",
+      "ignore": false
+    },
+    {
+      "id": "p9-short-sfx",
+      "box": [
+        0.1209,
+        0.2372,
+        0.04650000000000001,
+        0.0643
+      ],
+      "text": "にっこり",
+      "direction": "vertical",
+      "textType": "sfx",
+      "ignore": false
+    }
+  ],
+  "ignoreRegions": []
+}

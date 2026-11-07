@@ -4,10 +4,58 @@
   "partial": true,
   "allowEmpty": false,
   "bubbles": [
-    { "id": "p20-missing-short-vertical", "box": [0.211, 0.431, 0.041, 0.040], "text": "…はい♡", "direction": "vertical", "textType": "bubble", "ignore": false },
-    { "id": "p20-long-bubble", "box": [0.697, 0.445, 0.073, 0.147], "text": "神子さんお手伝いお願いします", "direction": "vertical", "textType": "bubble", "ignore": false },
-    { "id": "p20-narrow-bubble", "box": [0.849, 0.354, 0.038, 0.155], "text": "仕方ありませんね…♡", "direction": "vertical", "textType": "bubble", "ignore": false },
-    { "id": "p20-green-short", "box": [0.157, 0.784, 0.036, 0.080], "text": "吉原…っ!", "direction": "vertical", "textType": "bubble", "ignore": false }
+    {
+      "id": "p20-missing-short-vertical",
+      "box": [
+        0.211,
+        0.386,
+        0.041,
+        0.084
+      ],
+      "text": "…はい♡",
+      "direction": "vertical",
+      "textType": "bubble",
+      "ignore": false
+    },
+    {
+      "id": "p20-long-bubble",
+      "box": [
+        0.697,
+        0.445,
+        0.073,
+        0.147
+      ],
+      "text": "神子さんお手伝いお願いします",
+      "direction": "vertical",
+      "textType": "bubble",
+      "ignore": false
+    },
+    {
+      "id": "p20-narrow-bubble",
+      "box": [
+        0.849,
+        0.354,
+        0.038,
+        0.155
+      ],
+      "text": "仕方ありませんね…♡",
+      "direction": "vertical",
+      "textType": "bubble",
+      "ignore": false
+    },
+    {
+      "id": "p20-green-short",
+      "box": [
+        0.157,
+        0.784,
+        0.036,
+        0.08
+      ],
+      "text": "吉原…っ!",
+      "direction": "vertical",
+      "textType": "bubble",
+      "ignore": false
+    }
   ],
   "ignoreRegions": []
 }
