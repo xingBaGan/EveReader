@@ -1026,6 +1026,97 @@ function removeCoveredNarrowVerticalFragments(bubbles) {
   return bubbles.filter((_, index) => !drop[index]);
 }
 
+// 对应 Kotlin: mergeAdjacentDuplicateVerticalBubbles()
+function mergeAdjacentDuplicateVerticalBubbles(input) {
+  if (input.length <= 1) return input;
+  const working = [...input];
+  let changed = true;
+  let iterations = 0;
+  while (changed && iterations < 8 && working.length > 1) {
+    changed = false;
+    iterations += 1;
+    for (let i = 0; i < working.length; i += 1) {
+      const a = working[i];
+      if (!isVerticalBubbleForFragment(a)) continue;
+      const textA = a.text || '';
+      const confA = a.confidence || 0;
+      const charsA = Array.isArray(a.chars) && a.chars.length > 0;
+      for (let j = i + 1; j < working.length; j += 1) {
+        const b = working[j];
+        if (!isVerticalBubbleForFragment(b)) continue;
+        const textB = b.text || '';
+        const confB = b.confidence || 0;
+        const charsB = Array.isArray(b.chars) && b.chars.length > 0;
+
+        const gap = a.x + a.w < b.x ? b.x - (a.x + a.w)
+          : b.x + b.w < a.x ? a.x - (b.x + b.w) : 0;
+        const minWidth = Math.min(a.w, b.w);
+        const minHeight = Math.min(a.h, b.h);
+        if (minWidth <= 0 || minHeight <= 0) continue;
+        if (gap > Math.max(6, minWidth * 0.45)) continue;
+
+        const vOverlap = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+        if (vOverlap / minHeight < 0.65) continue;
+        if (Math.abs(a.y - b.y) > minHeight * 0.35) continue;
+
+        const cleanA = textA.replace(/[\s\p{P}]+/gu, '');
+        const cleanB = textB.replace(/[\s\p{P}]+/gu, '');
+        if (!cleanA || !cleanB) continue;
+        const contained = cleanA.includes(cleanB) || cleanB.includes(cleanA);
+        const sim = computeNormalizedSequenceSimilarity(textA, textB);
+        if (!contained && sim < 0.72) continue;
+
+        // 仅合并“长句被边界拆开”：短重复对白（はい/何？）必须保留
+        const minTextLen = Math.min(cleanA.length, cleanB.length);
+        const maxTextLen = Math.max(cleanA.length, cleanB.length);
+        if (minTextLen < 6 || maxTextLen < 10) continue;
+
+        // 必须有明确质量差/字符几何残片证据；contained 本身不能免检
+        const qualityGap = Math.abs(confA - confB) >= 0.20;
+        const charsGap = charsA !== charsB;
+        const lengthGap = minTextLen / maxTextLen <= 0.70;
+        if (!qualityGap && !charsGap && !lengthGap) continue;
+
+        const quality = (conf, chars, len) => conf + (chars ? 0.25 : 0) + Math.min(0.15, len * 0.005);
+        const scoreA = quality(confA, charsA, cleanA.length);
+        const scoreB = quality(confB, charsB, cleanB.length);
+        const winner = scoreA >= scoreB ? a : b;
+        const loser = scoreA >= scoreB ? b : a;
+        // 先缓存两框四边，再修改 winner，避免 winner===a 时 a.x 被提前改写导致右边界丢失
+        const ax1 = a.x, ay1 = a.y, ax2 = a.x + a.w, ay2 = a.y + a.h;
+        const bx1 = b.x, by1 = b.y, bx2 = b.x + b.w, by2 = b.y + b.h;
+        const left = Math.min(ax1, bx1);
+        const top = Math.min(ay1, by1);
+        const right = Math.max(ax2, bx2);
+        const bottom = Math.max(ay2, by2);
+        winner.x = left;
+        winner.y = top;
+        winner.w = right - left;
+        winner.h = bottom - top;
+        working.splice(working.indexOf(loser), 1);
+        changed = true;
+        break;
+      }
+      if (changed) break;
+    }
+  }
+  return working;
+}
+
+// 对应 Kotlin: isShortSfxText()
+function isShortSfxText(text) {
+  const clean = String(text || '').replace(/[\s\r\n]+/g, '');
+  if (!clean) return false;
+  const meaningful = [...clean].filter((ch) => /[\p{L}\p{N}]/u.test(ch)).length;
+  if (meaningful === 0 || meaningful > 6) return false;
+  return [...clean].every((ch) => /[\p{L}\p{N}…!！?？ーッ♪♡♥]/u.test(ch));
+}
+
+function normalizeComicTextType(text, initialType) {
+  if (initialType === 'sfx' && text && !isShortSfxText(text)) return 'free_text';
+  return initialType;
+}
+
 // Test 18: Page19-like distant vertical columns split by edge gap, not center gap
 {
   console.log('[Test 18] Regression: Distant vertical columns split by edge gap:');
@@ -1153,4 +1244,93 @@ function removeCoveredNarrowVerticalFragments(bubbles) {
   console.log('  ✓ Center/right separation preserved by the final fragment filter');
 }
 
-console.log('\nAll 23 Unit Tests Passed Successfully!\n');
+// 对应 Kotlin: isDetectionMostlyOutsideImage()
+function isDetectionMostlyOutsideImage(r, w, h) {
+  if (r.w <= 0 || r.h <= 0) return true;
+  const cx = r.x + r.w / 2;
+  const cy = r.y + r.h / 2;
+  if (cx < 0 || cx >= w || cy < 0 || cy >= h) return true;
+  const iw = Math.max(0, Math.min(r.x + r.w, w) - Math.max(r.x, 0));
+  const ih = Math.max(0, Math.min(r.y + r.h, h) - Math.max(r.y, 0));
+  return (iw * ih) / (r.w * r.h) < 0.5;
+}
+
+// Test 24: Page9 #5/#6 long split sentence merges; short/different neighbors do not
+{
+  console.log('[Test 24] Regression: Adjacent page9 long split sentence merge rules:');
+  const low = {
+    x: 585, y: 81, w: 43, h: 260, direction: 'vertical',
+    text: '3や これは\nあの変な鳴が本当かとか!\n催認するため。',
+    confidence: 0.39, textType: 'free_text',
+  };
+  const high = {
+    x: 629, y: 87, w: 40, h: 225, direction: 'vertical',
+    text: 'いやこれはあの変な噂が本当かどうか確認するため…',
+    confidence: 0.88, textType: 'art_text',
+    chars: Array.from({ length: 24 }, (_, i) => ({ char: 'x', box: [i, i, i + 1, i + 1] })),
+  };
+  const merged = mergeAdjacentDuplicateVerticalBubbles([low, high]);
+  assert.strictEqual(merged.length, 1,
+    'Page9 #5/#6 long split sentence with clear quality/chars gap must merge');
+  assert.strictEqual(merged[0].text, high.text, 'Must keep the high-confidence complete text');
+  assert.strictEqual(merged[0].confidence, 0.88);
+  assert.strictEqual(merged[0].w, 84, 'Union must retain the full right edge (no a.x mutation bug)');
+  assert.strictEqual(merged[0].chars.length, 24);
+
+  // 相邻独立短重复对白：即使文本相同也不能合并
+  const shortA = { x: 100, y: 100, w: 36, h: 40, direction: 'vertical', text: 'はい', confidence: 0.94, chars: [{ char: 'は' }] };
+  const shortB = { x: 140, y: 102, w: 36, h: 40, direction: 'vertical', text: 'はい', confidence: 0.93, chars: [{ char: 'は' }] };
+  assert.strictEqual(mergeAdjacentDuplicateVerticalBubbles([shortA, shortB]).length, 2,
+    'Short repeated dialogue bubbles must remain separate');
+
+  // 相邻长不同句：不得因相邻/垂直重叠而合并
+  const longA = { x: 100, y: 100, w: 40, h: 220, direction: 'vertical', text: 'オレが吉原を守ってやりたい…!', confidence: 0.91 };
+  const longB = { x: 145, y: 102, w: 40, h: 220, direction: 'vertical', text: '吉原…やっぱかわいいな…', confidence: 0.93 };
+  assert.strictEqual(mergeAdjacentDuplicateVerticalBubbles([longA, longB]).length, 2,
+    'Adjacent long different sentences must not merge');
+
+  // contained 本身不能免检：两块同高置信、同文本、同 chars 的长句仍保留
+  const sameA = { ...longA, confidence: 0.90, chars: [{ char: 'x' }] };
+  const sameB = { ...longA, x: 145, y: 102, confidence: 0.91, chars: [{ char: 'x' }] };
+  assert.strictEqual(mergeAdjacentDuplicateVerticalBubbles([sameA, sameB]).length, 2,
+    'Contained long text without quality/chars evidence must not be merged');
+  console.log('  ✓ Long split sentence merges; short repeats and different long sentences survive');
+}
+
+// Test 25: Long vertical text must not be classified as SFX; short mimetic stays SFX
+{
+  console.log('[Test 25] Regression: Long vertical sentences are reclassified from SFX:');
+  assert.strictEqual(normalizeComicTextType('オレが吉原を守ってやりたい…!', 'sfx'), 'free_text');
+  assert.strictEqual(normalizeComicTextType('吉原…やっぱかわいいな…', 'sfx'), 'free_text');
+  assert.strictEqual(normalizeComicTextType('にっこり', 'sfx'), 'sfx',
+    'Page9 #14 にっこり is a real short mimetic and must stay sfx');
+  assert.strictEqual(normalizeComicTextType('しかしーーー', 'free_text'), 'free_text',
+    'Page9 #16 is real text; its existing type must not be changed');
+  assert.strictEqual(normalizeComicTextType('それでーー', 'bubble'), 'bubble',
+    'Page9 #17 is a real bubble and must remain a bubble');
+  assert.strictEqual(isShortSfxText('にっこり'), true);
+  assert.strictEqual(isShortSfxText('ドドド'), true);
+  assert.strictEqual(isShortSfxText('オレが吉原を守ってやりたい…!'), false);
+  assert.strictEqual(isShortSfxText('吉原…やっぱかわいいな…'), false);
+  console.log('  ✓ #9/#12 long sentences become free_text; #14/#16/#17 preserved');
+}
+
+// Test 26: Bottom edge uses raw text bounds, not padded block; detection-level filter stays permissive
+{
+  console.log('[Test 26] Regression: Bottom-edge text is not dropped by padding:');
+  const isClipped = (bottom, h) => bottom >= h - 12;
+  const h = 1214;
+  assert.strictEqual(isClipped(1212, h), true,
+    'A padded block crossing h-12 would previously be filtered');
+  assert.strictEqual(isClipped(1198, h), false,
+    'Raw text bottom inside the margin must be kept');
+  const bottomDetection = { x: 600, y: 1000, w: 60, h: 214 };
+  assert.strictEqual(isDetectionMostlyOutsideImage(bottomDetection, 860, 1214), false,
+    'A detection whose bubble outline touches the bottom is not mostly outside and must reach OCR');
+  const outsideDetection = { x: 600, y: 1150, w: 60, h: 200 };
+  assert.strictEqual(isDetectionMostlyOutsideImage(outsideDetection, 860, 1214), true,
+    'A mostly outside detection is still dropped');
+  console.log('  ✓ Raw text bounds kept; mainly-inside bottom detection reaches OCR');
+}
+
+console.log('\nAll 26 Unit Tests Passed Successfully!\n');

@@ -384,10 +384,13 @@ object MangaOcrProcessor {
       }
     }
 
-    // 第二阶段：窄竖排残片抑制（必须在边缘解耦前执行，否则残片会被推开而失去覆盖证据）
-    val fragmentFiltered = removeCoveredNarrowVerticalFragments(mutableList)
+    // 第二阶段：相邻重复/边界错拆合并（同一多列句被拆成左右两个紧邻框）
+    val adjacentMerged = mergeAdjacentDuplicateVerticalBubbles(mutableList)
 
-    // 第三阶段：轻微边缘交叠解耦 (Edge Separation for slight overlap)
+    // 第三阶段：窄竖排残片抑制（必须在边缘解耦前执行，否则残片会被推开而失去覆盖证据）
+    val fragmentFiltered = removeCoveredNarrowVerticalFragments(adjacentMerged)
+
+    // 第四阶段：轻微边缘交叠解耦 (Edge Separation for slight overlap)
     for (i in 0 until fragmentFiltered.size) {
       val bA = fragmentFiltered[i]
       val boxA = bA["box"] as? Map<*, *> ?: continue
@@ -446,8 +449,120 @@ object MangaOcrProcessor {
     return fragmentFiltered
   }
 
+  private fun bubbleRectOf(bubble: Map<String, Any>): Rect? {
+    val box = bubble["box"] as? Map<*, *> ?: return null
+    val x = (box["x"] as? Number)?.toInt() ?: return null
+    val y = (box["y"] as? Number)?.toInt() ?: return null
+    val w = (box["width"] as? Number)?.toInt() ?: return null
+    val h = (box["height"] as? Number)?.toInt() ?: return null
+    if (w <= 0 || h <= 0) return null
+    return Rect(x, y, x + w, y + h)
+  }
+
+  private fun isVerticalBubbleMap(bubble: Map<String, Any>, rect: Rect): Boolean {
+    val direction = bubble["direction"] as? String
+    return direction == "vertical" ||
+      (direction != "horizontal" && rect.height() > rect.width() * 1.15f)
+  }
+
   /**
-   * 第二阶段：窄竖排残片抑制。
+   * 相邻重复/边界错拆合并。
+   *
+   * 同一多列句被拆成左右两个紧邻框时：它们几乎无重叠，但有强垂直重叠、
+   * 文本高度相似，且一个明显低质量/无 chars。此时合并为完整包络，保留高置信、
+   * 带 chars 的一方文本。仅处理紧邻且文字充分的竖排框；短重复对白与不同文本不合并。
+   */
+  private fun mergeAdjacentDuplicateVerticalBubbles(
+    bubbles: List<MutableMap<String, Any>>
+  ): List<MutableMap<String, Any>> {
+    if (bubbles.size <= 1) return bubbles
+    val working = bubbles.toMutableList()
+    var changed = true
+    var iterations = 0
+
+    while (changed && iterations < 8 && working.size > 1) {
+      changed = false
+      iterations++
+      outer@ for (i in working.indices) {
+        val a = working[i]
+        val ra = bubbleRectOf(a) ?: continue
+        if (!isVerticalBubbleMap(a, ra)) continue
+        val textA = a["sourceText"] as? String ?: ""
+        val confA = (a["confidence"] as? Number)?.toFloat() ?: 0f
+        val charsA = (a["chars"] as? List<*>)?.isNotEmpty() == true
+
+        for (j in i + 1 until working.size) {
+          val b = working[j]
+          val rb = bubbleRectOf(b) ?: continue
+          if (!isVerticalBubbleMap(b, rb)) continue
+          val textB = b["sourceText"] as? String ?: ""
+          val confB = (b["confidence"] as? Number)?.toFloat() ?: 0f
+          val charsB = (b["chars"] as? List<*>)?.isNotEmpty() == true
+
+          val gap = when {
+            ra.right < rb.left -> rb.left - ra.right
+            rb.right < ra.left -> ra.left - rb.right
+            else -> 0
+          }
+          val minWidth = min(ra.width(), rb.width())
+          val minHeight = min(ra.height(), rb.height())
+          if (minWidth <= 0 || minHeight <= 0) continue
+          if (gap > max(6f, minWidth * 0.45f)) continue
+
+          val verticalOverlap = max(0, min(ra.bottom, rb.bottom) - max(ra.top, rb.top))
+          if (verticalOverlap.toFloat() / minHeight < 0.65f) continue
+          if (abs(ra.top - rb.top) > minHeight * 0.35f) continue
+
+          val cleanA = textA.replace(Regex("[\\s\\p{P}]+"), "")
+          val cleanB = textB.replace(Regex("[\\s\\p{P}]+"), "")
+          if (cleanA.isEmpty() || cleanB.isEmpty()) continue
+          val contained = cleanA.contains(cleanB) || cleanB.contains(cleanA)
+          val sim = computeNormalizedSequenceSimilarity(textA, textB)
+          if (!contained && sim < 0.72f) continue
+
+          // 仅合并“长句被边界拆开”的情况：短重复对白（はい/何？）即使相同也保留
+          val minTextLen = min(cleanA.length, cleanB.length)
+          val maxTextLen = max(cleanA.length, cleanB.length)
+          if (minTextLen < 6 || maxTextLen < 10) continue
+
+          // 必须有明确质量差/字符几何残片证据；contained 本身不能免检
+          val qualityGap = abs(confA - confB) >= 0.20f
+          val charsGap = charsA != charsB
+          val lengthGap = minTextLen.toFloat() / maxTextLen.toFloat() <= 0.70f
+          if (!qualityGap && !charsGap && !lengthGap) continue
+
+          fun quality(conf: Float, chars: Boolean, cleanLength: Int): Float =
+            conf + (if (chars) 0.25f else 0f) + min(0.15f, cleanLength * 0.005f)
+
+          val scoreA = quality(confA, charsA, cleanA.length)
+          val scoreB = quality(confB, charsB, cleanB.length)
+          val winner = if (scoreA >= scoreB) a else b
+          val loser = if (scoreA >= scoreB) b else a
+          val winnerRect = if (scoreA >= scoreB) ra else rb
+          val loserRect = if (scoreA >= scoreB) rb else ra
+          val unionRect = Rect(
+            min(winnerRect.left, loserRect.left),
+            min(winnerRect.top, loserRect.top),
+            max(winnerRect.right, loserRect.right),
+            max(winnerRect.bottom, loserRect.bottom)
+          )
+          winner["box"] = mapOf(
+            "x" to unionRect.left,
+            "y" to unionRect.top,
+            "width" to unionRect.width(),
+            "height" to unionRect.height()
+          )
+          working.remove(loser)
+          changed = true
+          break@outer
+        }
+      }
+    }
+    return working
+  }
+
+  /**
+   * 第三阶段：窄竖排残片抑制。
    *
    * 同一段竖排对白常会同时出现一个覆盖完整的框和一个很窄的重复/残片框
    * （例如 page19 右侧完整框后面的紫色窄框）。仅当窄框被同一区域的更完整框
@@ -1365,6 +1480,23 @@ object MangaOcrProcessor {
   }
 
   /**
+   * 仅把短小的拟声/拟态词视为 SFX。竖排长句天然 aspect < 0.6，
+   * 不能仅凭框形判成拟声词；这里以有效字符数为准，保留「にっこり」等短词。
+   */
+  private fun isShortSfxText(text: String): Boolean {
+    val clean = text.replace(Regex("[\\s\\r\\n]+"), "")
+    if (clean.isEmpty()) return false
+    val meaningful = clean.count { ch ->
+      ch.isLetterOrDigit() || ch in '\u3040'..'\u30FF' || ch in '\u3400'..'\u9FFF'
+    }
+    if (meaningful == 0 || meaningful > 6) return false
+    return clean.all { ch ->
+      ch.isLetterOrDigit() || ch in '\u3040'..'\u30FF' || ch in '\u3400'..'\u9FFF' ||
+        ch in "…!！?？ーッ♪♡♥"
+    }
+  }
+
+  /**
    * 将漫画专用深度学习检测器 (ComicTextDetector) 产出的目标框与全屏 OCR 结果深度融合
    * 1. 弥补全屏 ML Kit 漏检的拟声词 (SFX)、艺术字 (描き文字) 与异形气泡；
    * 2. 对每个未匹配上的专用检测框进行局部切片靶向增强 OCR，最大化文字产出率；
@@ -1403,7 +1535,7 @@ object MangaOcrProcessor {
 
     for (det in expandedDetections) {
       val dRect = det.bounds
-      if (isClippedByScreenEdge(dRect, sourceBitmap.width, sourceBitmap.height)) continue
+      if (isDetectionMostlyOutsideImage(dRect, sourceBitmap.width, sourceBitmap.height)) continue
 
       var matchedExistingIndex = -1
       for (i in resultList.indices) {
@@ -1493,19 +1625,25 @@ object MangaOcrProcessor {
           val currentType = existing["textType"] as? String ?: "bubble"
           if (currentType == "bubble" || currentType == "free_text") {
             val aspect = dRect.width().toFloat() / max(1, dRect.height())
-            val isSfx = (aspect > 1.4f || aspect < 0.6f) && (dRect.width() * dRect.height() < sourceBitmap.width * sourceBitmap.height * 0.08f)
-            existing["textType"] = if (isSfx) "sfx" else "art_text"
+            val geometrySfx = (aspect > 1.4f || aspect < 0.6f) &&
+              (dRect.width() * dRect.height() < sourceBitmap.width * sourceBitmap.height * 0.08f)
+            val typeText = (existing["sourceText"] as? String)?.takeIf { it.isNotBlank() } ?: curText
+            existing["textType"] = when {
+              geometrySfx && isShortSfxText(typeText) -> "sfx"
+              geometrySfx -> if (currentType == "bubble") "bubble" else "free_text"
+              else -> "art_text"
+            }
           }
         }
         resultList[matchedExistingIndex] = existing
       } else {
-        if (isClippedByScreenEdge(dRect, sourceBitmap.width, sourceBitmap.height)) {
+        if (isDetectionMostlyOutsideImage(dRect, sourceBitmap.width, sourceBitmap.height)) {
           continue
         }
 
         val aspect = dRect.width().toFloat() / max(1, dRect.height())
         val isSfx = det.category == 2 && ((aspect > 1.4f || aspect < 0.6f) || (dRect.width() * dRect.height() < sourceBitmap.width * sourceBitmap.height * 0.06f))
-        val textType = if (det.category == 2) (if (isSfx) "sfx" else "art_text") else "bubble"
+        var textType = if (det.category == 2) (if (isSfx) "sfx" else "art_text") else "bubble"
 
         val targetEnhancement = enhanceCandidateRegion(
           recognizer = recognizer,
@@ -1517,6 +1655,11 @@ object MangaOcrProcessor {
 
         val recognizedText = targetEnhancement?.get("sourceText") as? String ?: ""
         val hasValidOcr = recognizedText.isNotBlank() && !isJunkNoiseLine(recognizedText, dRect)
+
+        // 竖排长句天然 aspect < 0.6，不能仅凭几何判成拟声词；以实际 OCR 文本长度纠偏。
+        if (textType == "sfx" && hasValidOcr && !isShortSfxText(recognizedText)) {
+          textType = "free_text"
+        }
 
         // 方法 2 防丢弃机制：
         // 若局部 OCR 暂时未能提取出纯文本，但该框由模型高置信度检出为艺术字/拟声词 (category == 2 且 score >= 0.18f)：
@@ -2550,6 +2693,19 @@ object MangaOcrProcessor {
     return false
   }
 
+  /**
+   * 检测框级过滤：只丢弃主体在图片外/中心越界的检测。
+   * 不能像最终文本块那样使用 h-12 紧边规则——气泡外轮廓贴底不代表文字被截断；
+   * 否则底部完整气泡会在 OCR/融合之前就被提前丢掉。
+   */
+  private fun isDetectionMostlyOutsideImage(r: Rect, w: Int, h: Int): Boolean {
+    if (r.width() <= 0 || r.height() <= 0) return true
+    if (r.centerX() !in 0 until w || r.centerY() !in 0 until h) return true
+    val visible = computeIntersection(r, Rect(0, 0, w, h))
+    val area = r.width().toFloat() * r.height().toFloat()
+    return area <= 0f || visible / area < 0.5f
+  }
+
   private fun clusterAndFormatBubbles(
     rawLines: List<TextLineItem>,
     bitmap: Bitmap,
@@ -2760,9 +2916,12 @@ object MangaOcrProcessor {
       val finalHeight = min(bitmap.height - finalTop, (maxY - minY) + paddingY * 2)
 
       val blockRect = Rect(finalLeft, finalTop, finalLeft + finalWidth, finalTop + finalHeight)
+      val textRect = Rect(minX, minY, maxX, maxY)
 
       // 严格检查聚类后的完整文本块是否被屏幕物理边界截断：
-      if (isClippedByScreenEdge(blockRect, bitmap.width, bitmap.height)) {
+      // 用真实文本包围盒而不是带 padding 的 blockRect，避免完整底部气泡仅因外扩留白
+      // 越过 h-12 而被误判成截断文本。
+      if (isClippedByScreenEdge(textRect, bitmap.width, bitmap.height)) {
         // 边缘残缺文本：部分文字在屏幕外，上下文不全，坚决省略
         continue
       }
