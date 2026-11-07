@@ -357,7 +357,8 @@ export function ReaderModal() {
 
       case 'bubblePressed':
         if (data.bubble) {
-          setSelectedBubble(data.bubble);
+          const currentBubble = useReaderStore.getState().detectedBubbles.find((bubble) => bubble.id === data.bubble.id);
+          setSelectedBubble(currentBubble || data.bubble);
         }
         break;
 
@@ -378,11 +379,11 @@ export function ReaderModal() {
       const abortController = new AbortController();
       translationAbortRef.current = abortController;
 
-      const validBubbles = bubbles.filter((b) => b.sourceText && b.sourceText.trim().length > 0);
+      const validBubbles = bubbles.filter((b) => !b.isPlaceholder && b.sourceText && b.sourceText.trim().length > 0);
       if (validBubbles.length === 0) return;
 
       const initialTranslating = bubbles.map((b) =>
-        b.sourceText && b.sourceText.trim().length > 0
+        !b.isPlaceholder && b.sourceText && b.sourceText.trim().length > 0
           ? { ...b, translationStatus: 'translating' as const, translationError: undefined }
           : b
       );
@@ -478,7 +479,7 @@ export function ReaderModal() {
           }
           console.warn('[ReaderModal] 端侧离线翻译未完成:', err);
           const errorBubbles = useReaderStore.getState().detectedBubbles.map((b) => {
-            if (b.sourceText && b.sourceText.trim()) {
+            if (!b.isPlaceholder && b.sourceText && b.sourceText.trim()) {
               return {
                 ...b,
                 translationStatus: 'error' as const,
@@ -504,7 +505,7 @@ export function ReaderModal() {
 
   const handleRetryTranslateBubble = useCallback(
     async (bubble: TextBubble) => {
-      if (!bubble || !bubble.sourceText.trim() || bubble.translationStatus === 'translating') return;
+      if (!bubble || bubble.isPlaceholder || !bubble.sourceText.trim() || bubble.translationStatus === 'translating') return;
 
       const capturedPage = useReaderStore.getState().currentPage;
       const capturedBookId = currentBook ? String(currentBook.id) : '';

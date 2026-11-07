@@ -19,6 +19,7 @@ export interface TextBubble {
   direction: 'vertical' | 'horizontal';
   readingOrderIndex: number;
   sourceText: string;
+  isPlaceholder?: boolean;
   furiganaCleanedText?: string;
   targetText: string;
   detectedBgColor: string;

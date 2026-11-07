@@ -977,7 +977,7 @@ object MangaOcrProcessor {
 
     val cleanedBubbles = filterFalsePositiveArtBoxes(fusedBubbles, bitmap)
     val filtered = filterByTargetLanguage(cleanedBubbles, filterLang)
-    val finalBubbles = resolveBubbleOverlaps(filtered)
+    val finalBubbles = refineWeakBubbles(resolveBubbleOverlaps(filtered), recognizer, bitmap, filterLang)
     android.util.Log.i("BubbleOCR", "[FINAL_RESULTS] resolveBubbleOverlaps returning ${finalBubbles.size} bubbles")
     return finalBubbles
   }
@@ -1427,6 +1427,70 @@ object MangaOcrProcessor {
    * 这里把这种检测框按“同一列内可合并”的水平间距拆成若干子区域；只有真正
    * 分离的列才会拆，普通单气泡（只覆盖一个框）返回空列表，保持原增强路径。
    */
+  /** A detector may span independent vertical paragraphs. Split only at a
+   * clear empty horizontal gap between confidently recognized characters. */
+  private fun charSeparatedRegions(bitmap: Bitmap, bounds: Rect): List<Rect> {
+    if (!MangaOcrModel.isModelReady || bounds.width() < 120 ||
+      bounds.height() < 100 || bounds.width() > bounds.height() * 1.4f) return emptyList()
+    val left = max(0, bounds.left - 8)
+    val top = max(0, bounds.top - 8)
+    val right = min(bitmap.width, bounds.right + 8)
+    val bottom = min(bitmap.height, bounds.bottom + 8)
+    if (right <= left || bottom <= top) return emptyList()
+    val crop = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
+    return try {
+      val chars = MangaOcrModel.recognizeDetail(crop).chars.filter { c ->
+        c.score >= 0.50f && c.box.width() >= 3f && c.box.height() >= 3f &&
+          c.char.any { it.isLetterOrDigit() }
+      }
+      if (chars.size < 8) return emptyList()
+      val widths = chars.map { it.box.width() }.sorted()
+      val gapLimit = max(18f, widths[widths.size / 2] * 1.5f)
+      val groups = mutableListOf<MutableList<MangaOcrModel.CharBox>>()
+      for (char in chars.sortedBy { it.box.left }) {
+        val group = groups.lastOrNull()
+        if (group != null && char.box.left - group.maxOf { it.box.right } <= gapLimit) {
+          group.add(char)
+        } else groups.add(mutableListOf(char))
+      }
+      if (groups.size < 2 || groups.any { it.size < 4 }) return emptyList()
+      val regions = groups.map { group ->
+        Rect(max(0, left + group.minOf { it.box.left }.toInt() - 6),
+          max(0, top + group.minOf { it.box.top }.toInt() - 8),
+          min(bitmap.width, left + group.maxOf { it.box.right }.toInt() + 6),
+          min(bitmap.height, top + group.maxOf { it.box.bottom }.toInt() + 8))
+      }
+      android.util.Log.i("BubbleOCR", "[CHAR_GAP_SPLIT] $bounds -> $regions")
+      regions
+    } catch (e: Exception) {
+      android.util.Log.w("BubbleOCR", "Character-gap inspection failed", e)
+      emptyList()
+    } finally { crop.recycle() }
+  }
+
+  private suspend fun refineWeakBubbles(
+    bubbles: List<Map<String, Any>>, recognizer: TextRecognizer,
+    bitmap: Bitmap, preferredLang: String
+  ): List<Map<String, Any>> = bubbles.map { bubble ->
+    val confidence = (bubble["confidence"] as? Number)?.toFloat() ?: 1f
+    val text = bubble["sourceText"] as? String ?: ""
+    val hasChars = (bubble["chars"] as? List<*>)?.isNotEmpty() == true
+    val rect = bubbleRectOf(bubble)
+    if (confidence >= 0.65f || hasChars || text.isBlank() || text.startsWith("[") || rect == null) {
+      bubble
+    } else {
+      val enhanced = enhanceCandidateRegion(recognizer, bitmap, rect, preferredLang, true)
+      val improved = (enhanced?.get("confidence") as? Number)?.toFloat() ?: 0f
+      if (enhanced == null || improved < confidence + 0.10f) bubble else {
+        bubble.toMutableMap().apply {
+          for (key in listOf("sourceText", "lines", "columnCount", "direction", "confidence", "chars", "ocrEngine")) {
+            enhanced[key]?.let { this[key] = it }
+          }
+        }
+      }
+    }
+  }
+
   private fun bridgeSubRegions(
     detection: Rect,
     bubbles: List<Map<String, Any>>
@@ -1451,7 +1515,7 @@ object MangaOcrProcessor {
       if (!isVertical) continue
       covered.add(rect)
     }
-    if (covered.isEmpty()) return emptyList()
+    if (covered.size < 2) return emptyList()
 
     val sorted = covered.sortedBy { it.left }
     val groups = mutableListOf<MutableList<Rect>>()
@@ -1468,6 +1532,7 @@ object MangaOcrProcessor {
       }
       groups.add(mutableListOf(rect))
     }
+    if (groups.size < 2) return emptyList()
 
     val regions = groups.mapNotNull { group ->
       val left = max(detection.left, group.minOf { it.left })
@@ -1475,21 +1540,7 @@ object MangaOcrProcessor {
       val right = min(detection.right, group.maxOf { it.right })
       val bottom = min(detection.bottom, group.maxOf { it.bottom })
       if (right > left && bottom > top) Rect(left, top, right, bottom) else null
-    }.toMutableList()
-
-    // 宽检测框可能同时覆盖已有气泡和尚未被基础框覆盖的相邻列（例如玻璃杯左侧旁白）。
-    // 若只在 covered 气泡上拆分，未被基础框覆盖的侧边文字会随宽区域混读后被丢弃。
-    // 仅当侧边带足够宽时才补一个局部 OCR 子区域；普通单气泡的少量 padding 不触发。
-    val minBandWidth = max(40f, detection.width() * 0.25f)
-    val coveredLeft = covered.minOf { it.left }
-    val coveredRight = covered.maxOf { it.right }
-    if (coveredLeft - detection.left >= minBandWidth) {
-      regions.add(Rect(detection.left, detection.top, coveredLeft, detection.bottom))
     }
-    if (detection.right - coveredRight >= minBandWidth) {
-      regions.add(Rect(coveredRight, detection.top, detection.right, detection.bottom))
-    }
-
     return if (regions.size >= 2) regions else emptyList()
   }
 
@@ -1531,7 +1582,8 @@ object MangaOcrProcessor {
     val textDetections = detections.filter { it.category == 1 || it.category == 2 }
     // 宽桥接检测框先拆成每个分离气泡列的子检测，避免其跨列 tightBox 回写单个气泡
     val expandedDetections = textDetections.flatMap { det ->
-      val subRegions = bridgeSubRegions(det.bounds, resultList)
+      val charRegions = charSeparatedRegions(sourceBitmap, det.bounds)
+      val subRegions = if (charRegions.size >= 2) charRegions else bridgeSubRegions(det.bounds, resultList)
       if (subRegions.size >= 2) {
         subRegions.map { region ->
           ComicTextDetector.ComicDetection(
@@ -1712,6 +1764,7 @@ object MangaOcrProcessor {
           "id" to "comic_det_${nextId++}",
           "box" to boxToUse,
           "sourceText" to displaySourceText,
+          "isPlaceholder" to !hasValidOcr,
           "targetText" to "",
           "direction" to (targetEnhancement?.get("direction") as? String ?: if (dRect.height() > dRect.width() * 1.15f) "vertical" else "horizontal"),
           "columnCount" to if (hasValidOcr) detectedCols else 1,

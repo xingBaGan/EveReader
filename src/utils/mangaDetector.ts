@@ -119,6 +119,7 @@ export async function detectBubblesForPage(
             direction: b.direction === 'horizontal' ? 'horizontal' : 'vertical',
             readingOrderIndex: index + 1,
             sourceText: b.text || b.sourceText || '',
+            isPlaceholder: b.isPlaceholder === true,
             targetText: b.targetText || '',
             detectedBgColor: b.detectedBgColor || '#FFFFFF',
             detectedTextColor: b.detectedTextColor || '#18181B',

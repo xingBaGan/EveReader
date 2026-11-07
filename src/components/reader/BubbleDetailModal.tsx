@@ -159,7 +159,7 @@ export const BubbleDetailModal: React.FC<Props> = ({
                   <RefreshCw size={12} color="#ef4444" style={{ marginRight: 4 }} />
                   <Text style={[styles.retryActionText, { color: '#ef4444' }]}>重试</Text>
                 </Pressable>
-              ) : !bubble.targetText ? (
+              ) : !bubble.targetText && !bubble.isPlaceholder ? (
                 <Pressable
                   style={styles.retryActionBtn}
                   onPress={() => onRetryTranslate?.(bubble)}>
@@ -223,7 +223,7 @@ export const BubbleDetailModal: React.FC<Props> = ({
                   },
                 ]}>
                 <Text style={{ fontSize: 13, color: isDark ? '#64748b' : '#94a3b8' }}>
-                  未获取到中文译文。点击右上角【开始翻译】发起离线翻译。
+                  {bubble.isPlaceholder ? '尚未识别到文字，请重新识别此区域。' : '未获取到中文译文。点击右上角【开始翻译】发起离线翻译。'}
                 </Text>
               </View>
             )}
