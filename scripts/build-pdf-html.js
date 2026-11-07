@@ -127,8 +127,8 @@ const clientHtml = `<!DOCTYPE html>
       color: #0284c7;
       border: 1px solid rgba(2, 132, 199, 0.45);
       border-radius: 10px;
-      min-width: 28px;
-      min-height: 28px;
+      min-width: 24px;
+      min-height: 24px;
       padding: 2px 5px;
       font-size: 10px;
       font-weight: 700;
@@ -391,50 +391,34 @@ ${pdfJsCode}
         var wrapperW = overlay.clientWidth || (cv ? Math.floor(cv.width / (window.devicePixelRatio || 1)) : 360);
         var wrapperH = overlay.clientHeight || (cv ? Math.floor(cv.height / (window.devicePixelRatio || 1)) : 500);
 
-        bubbles.forEach(function(b) {
+        function percentBox(b) {
           var box = b.box;
-          if (!box) return;
-
+          if (!box) return null;
+          var sx = 1, sy = 1;
+          if (box.x <= 1 && box.y <= 1 && box.width <= 1 && box.height <= 1) {
+            sx = sy = 100;
+          } else if (box.x > 100 || box.y > 100 || box.width > 100 || box.height > 100) {
+            sx = 100 / (b.refWidth || cvW);
+            sy = 100 / (b.refHeight || cvH);
+          }
+          var left = Math.max(0, Math.min(100, box.x * sx));
+          var top = Math.max(0, Math.min(100, box.y * sy));
+          return { left: left, top: top,
+            width: Math.max(0, Math.min(100 - left, box.width * sx)),
+            height: Math.max(0, Math.min(100 - top, box.height * sy)) };
+        }
+        var regions = bubbles.map(percentBox);
+        bubbles.forEach(function(b, index) {
+          var region = regions[index];
           var targetText = (b.targetText || '').trim();
-          // 加载期间保留原图；未识别/失败或未就绪时不画假译文覆盖层
-          if (!targetText) {
-            return;
-          }
-
-          var leftPct, topPct, widthPct, heightPct;
-
-          if (box.x <= 1.0 && box.y <= 1.0 && box.width <= 1.0 && box.height <= 1.0) {
-            // 归一化比例 (0.0 ~ 1.0)
-            leftPct = box.x * 100;
-            topPct = box.y * 100;
-            widthPct = box.width * 100;
-            heightPct = box.height * 100;
-          } else if (box.x <= 100.0 && box.y <= 100.0 && box.width <= 100.0 && box.height <= 100.0) {
-            // 已是百分比坐标 (0.0% ~ 100.0%)
-            leftPct = box.x;
-            topPct = box.y;
-            widthPct = box.width;
-            heightPct = box.height;
-          } else {
-            // 绝对像素坐标 (> 100)
-            var refW = b.refWidth || cvW || 600;
-            var refH = b.refHeight || cvH || 800;
-            leftPct = (box.x / refW) * 100;
-            topPct = (box.y / refH) * 100;
-            widthPct = (box.width / refW) * 100;
-            heightPct = (box.height / refH) * 100;
-          }
-
-          var left = Math.max(0, Math.min(100, leftPct));
-          var top = Math.max(0, Math.min(100, topPct));
-          var width = Math.max(0, Math.min(100 - left, widthPct));
-          var height = Math.max(0, Math.min(100 - top, heightPct));
+          if (!region || !targetText) return;
+          var left = region.left, top = region.top, width = region.width, height = region.height;
 
           var boxPixelW = (width / 100) * wrapperW;
           var boxPixelH = (height / 100) * wrapperH;
 
           // 过小区域（宽度或高度过小，无法容纳文字且容易遮挡小画面）使用轻量胶囊入口
-          var isMiniEntry = (boxPixelW < 14 || boxPixelH < 18 || (boxPixelW * boxPixelH < 200));
+          var isMiniEntry = (boxPixelW < 8 || boxPixelH < 18 || (boxPixelW * boxPixelH < 120));
 
           var el = document.createElement('div');
           el.setAttribute('role', 'button');
@@ -482,13 +466,32 @@ ${pdfJsCode}
           overlay.appendChild(el);
           if (!isMiniEntry) {
             // Measure real wrapping after insertion; area estimates alone can clip narrow columns.
-            var fits = false;
             var inset = el.style.padding === '0px' || el.style.padding === '0' ? 0 : 4;
-            for (var size = 16; size >= 11; size -= 0.5) {
-              span.style.fontSize = size + 'px';
-              if (span.scrollHeight <= el.clientHeight - inset && span.scrollWidth <= el.clientWidth - inset) {
-                fits = true;
-                break;
+            function fitText() {
+              for (var size = 16; size >= 11; size -= 0.5) {
+                span.style.fontSize = size + 'px';
+                if (span.scrollHeight <= el.clientHeight - inset && span.scrollWidth <= el.clientWidth - inset) return true;
+              }
+              return false;
+            }
+            var fits = fitText();
+            if (!fits) {
+              // OCR bounds hug the original glyphs. Allow modest extra width,
+              // stopping halfway to neighbouring text in the same vertical band.
+              var x = left / 100 * wrapperW;
+              var safeLeft = 0, safeRight = wrapperW;
+              regions.forEach(function(other, otherIndex) {
+                if (!other || index === otherIndex || other.top >= top + height || other.top + other.height <= top) return;
+                var otherLeft = other.left / 100 * wrapperW;
+                var otherRight = (other.left + other.width) / 100 * wrapperW;
+                if (otherRight <= x) safeLeft = Math.max(safeLeft, (otherRight + x) / 2);
+                if (otherLeft >= x + boxPixelW) safeRight = Math.min(safeRight, (otherLeft + x + boxPixelW) / 2);
+              });
+              var expandedW = Math.min(safeRight - safeLeft, Math.max(boxPixelW, Math.min(56, boxPixelW + 24, boxPixelW * 2.5)));
+              if (expandedW > boxPixelW) {
+                el.style.width = expandedW + 'px';
+                el.style.left = Math.max(safeLeft, Math.min(safeRight - expandedW, x + (boxPixelW - expandedW) / 2)) + 'px';
+                fits = fitText();
               }
             }
             if (!fits) {
@@ -497,6 +500,10 @@ ${pdfJsCode}
               el.style.height = '';
               el.textContent = '译';
             }
+          }
+          if (el.className === 'translation-mini-pill') {
+            el.style.left = Math.max(0, Math.min(wrapperW - 24, left / 100 * wrapperW)) + 'px';
+            el.style.top = Math.max(0, Math.min(wrapperH - 24, top / 100 * wrapperH)) + 'px';
           }
         });
       }

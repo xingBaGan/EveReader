@@ -157,7 +157,9 @@ export class TranslationOrchestrator {
     await Promise.all(
       bubbles.map(async (bubble) => {
         const cached = await this.cache.get(this.cacheKey(request, bubble, modelId));
-        if (cached) found.set(bubble.id, { ...cached, cached: true });
+        // OCR assigns fresh region IDs on every detection; cached content belongs
+        // to the current region, not the ID from the first detection.
+        if (cached) found.set(bubble.id, { ...cached, id: bubble.id, cached: true });
         else missing.push(bubble);
       })
     );
