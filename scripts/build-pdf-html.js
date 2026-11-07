@@ -466,12 +466,12 @@ ${pdfJsCode}
       function estimateSourceFontSize(b, scaleToCss, boxPixelH) {
         if (Array.isArray(b.chars) && b.chars.length > 0) {
           var sizes = [];
-          
+
           for (var i = 0; i < b.chars.length; i++) {
             var c = b.chars[i];
             if (!c || !c.box || c.box.length < 4) continue;
             var ch = (c.char || '').trim();
-            if (!ch || /^[、。！？!?…・ーっッ〜~()（）『』「」\s]+$/.test(ch)) continue;
+            if (!ch || /^[、。！？!?…・ーっッ〜~()（）『』「」\\s]+$/.test(ch)) continue;
             if (typeof c.score === 'number' && c.score < 0.35) continue;
             var gh = Math.abs(c.box[3] - c.box[1]);
             var dim = gh;
