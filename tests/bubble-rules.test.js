@@ -950,7 +950,7 @@ function bridgeSubRegions(detection, bubbles) {
   const covered = bubbles
     .filter((bubble) => bubble.vertical && overlap(bubble, detection) / (bubble.w * bubble.h) >= 0.5)
     .sort((a, b) => a.x - b.x);
-  if (covered.length < 2) return [];
+  if (covered.length === 0) return [];
 
   const groups = [];
   for (const rect of covered) {
@@ -966,7 +966,6 @@ function bridgeSubRegions(detection, bubbles) {
     }
     groups.push([rect]);
   }
-  if (groups.length < 2) return [];
 
   const regions = groups.map((group) => {
     const x = Math.max(detection.x, Math.min(...group.map((item) => item.x)));
@@ -975,6 +974,16 @@ function bridgeSubRegions(detection, bubbles) {
     const bottom = Math.min(detection.y + detection.h, Math.max(...group.map((item) => item.y + item.h)));
     return { x, y, w: right - x, h: bottom - y };
   }).filter((region) => region.w > 0 && region.h > 0);
+
+  const minBandWidth = Math.max(40, detection.w * 0.25);
+  const coveredLeft = Math.min(...covered.map((item) => item.x));
+  const coveredRight = Math.max(...covered.map((item) => item.x + item.w));
+  if (coveredLeft - detection.x >= minBandWidth) {
+    regions.push({ x: detection.x, y: detection.y, w: coveredLeft - detection.x, h: detection.h });
+  }
+  if (detection.x + detection.w - coveredRight >= minBandWidth) {
+    regions.push({ x: coveredRight, y: detection.y, w: detection.x + detection.w - coveredRight, h: detection.h });
+  }
 
   return regions.length >= 2 ? regions : [];
 }
@@ -1333,4 +1342,24 @@ function isDetectionMostlyOutsideImage(r, w, h) {
   console.log('  ✓ Raw text bounds kept; mainly-inside bottom detection reaches OCR');
 }
 
-console.log('\nAll 26 Unit Tests Passed Successfully!\n');
+// Test 27: Wide detection must not discard uncovered page9 narration beside an existing bubble
+{
+  console.log('[Test 27] Regression: Wide detection retains uncovered side-band text:');
+  const rightBubble = { x: 677, y: 215, w: 37, h: 194, vertical: true };
+  const wideDetection = { x: 540, y: 200, w: 190, h: 213 };
+  const regions = bridgeSubRegions(wideDetection, [rightBubble]);
+  assert.strictEqual(regions.length, 2,
+    'A wide detection with a significant uncovered left band must split into existing + side band');
+  const leftBand = regions.find((r) => r.x === 540);
+  assert.ok(leftBand, 'Uncovered left narration band must be kept for local OCR');
+  assert.strictEqual(leftBand.w, 137);
+  assert.ok(regions.some((r) => r.x === 677 && r.w === 37),
+    'The existing right bubble region must remain for its own local OCR');
+
+  const paddedSingle = { x: 640, y: 200, w: 80, h: 220 };
+  assert.deepStrictEqual(bridgeSubRegions(paddedSingle, [rightBubble]), [],
+    'Normal single-bubble padding must not trigger a side-band split');
+  console.log('  ✓ Uncovered narration band kept; normal single bubble unchanged');
+}
+
+console.log('\nAll 27 Unit Tests Passed Successfully!\n');

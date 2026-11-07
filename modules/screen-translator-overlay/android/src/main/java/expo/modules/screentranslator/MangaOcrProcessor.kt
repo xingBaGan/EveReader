@@ -536,10 +536,10 @@ object MangaOcrProcessor {
 
           val scoreA = quality(confA, charsA, cleanA.length)
           val scoreB = quality(confB, charsB, cleanB.length)
-          val winner = if (scoreA >= scoreB) a else b
-          val loser = if (scoreA >= scoreB) b else a
-          val winnerRect = if (scoreA >= scoreB) ra else rb
-          val loserRect = if (scoreA >= scoreB) rb else ra
+          val winnerIsA = scoreA >= scoreB
+          val winner = if (winnerIsA) a else b
+          val winnerRect = if (winnerIsA) ra else rb
+          val loserRect = if (winnerIsA) rb else ra
           val unionRect = Rect(
             min(winnerRect.left, loserRect.left),
             min(winnerRect.top, loserRect.top),
@@ -552,7 +552,8 @@ object MangaOcrProcessor {
             "width" to unionRect.width(),
             "height" to unionRect.height()
           )
-          working.remove(loser)
+          // 用已知索引删除，避免两个 map 内容相等时 remove(loser) 命中错误项
+          if (winnerIsA) working.removeAt(j) else working.removeAt(i)
           changed = true
           break@outer
         }
@@ -1450,7 +1451,7 @@ object MangaOcrProcessor {
       if (!isVertical) continue
       covered.add(rect)
     }
-    if (covered.size < 2) return emptyList()
+    if (covered.isEmpty()) return emptyList()
 
     val sorted = covered.sortedBy { it.left }
     val groups = mutableListOf<MutableList<Rect>>()
@@ -1467,7 +1468,6 @@ object MangaOcrProcessor {
       }
       groups.add(mutableListOf(rect))
     }
-    if (groups.size < 2) return emptyList()
 
     val regions = groups.mapNotNull { group ->
       val left = max(detection.left, group.minOf { it.left })
@@ -1475,7 +1475,21 @@ object MangaOcrProcessor {
       val right = min(detection.right, group.maxOf { it.right })
       val bottom = min(detection.bottom, group.maxOf { it.bottom })
       if (right > left && bottom > top) Rect(left, top, right, bottom) else null
+    }.toMutableList()
+
+    // 宽检测框可能同时覆盖已有气泡和尚未被基础框覆盖的相邻列（例如玻璃杯左侧旁白）。
+    // 若只在 covered 气泡上拆分，未被基础框覆盖的侧边文字会随宽区域混读后被丢弃。
+    // 仅当侧边带足够宽时才补一个局部 OCR 子区域；普通单气泡的少量 padding 不触发。
+    val minBandWidth = max(40f, detection.width() * 0.25f)
+    val coveredLeft = covered.minOf { it.left }
+    val coveredRight = covered.maxOf { it.right }
+    if (coveredLeft - detection.left >= minBandWidth) {
+      regions.add(Rect(detection.left, detection.top, coveredLeft, detection.bottom))
     }
+    if (detection.right - coveredRight >= minBandWidth) {
+      regions.add(Rect(coveredRight, detection.top, detection.right, detection.bottom))
+    }
+
     return if (regions.size >= 2) regions else emptyList()
   }
 
