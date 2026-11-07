@@ -90,12 +90,9 @@ const clientHtml = `<!DOCTYPE html>
     .translation-overlay-box {
       position: absolute;
       box-sizing: border-box;
-      background: #fff;
-      color: #0f172a;
-      border-radius: 4px;
-      border: 1px solid rgba(0, 0, 0, 0.12);
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16);
-      padding: 2px;
+      border: none;
+      border-radius: 0;
+      padding: 0;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -105,47 +102,14 @@ const clientHtml = `<!DOCTYPE html>
       pointer-events: auto;
       user-select: none;
       -webkit-user-select: none;
-      transition: transform 0.12s ease, background-color 0.15s ease;
-    }
-    .translation-overlay-box:active {
-      transform: scale(0.97);
-      background: #f1f5f9;
     }
     .translation-text-content {
       display: block;
-      width: 100%;
       overflow-wrap: anywhere;
-      line-height: 1.25;
+      word-break: break-word;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
       font-weight: 500;
-      color: #0f172a;
       letter-spacing: 0;
-    }
-    .translation-mini-pill {
-      position: absolute;
-      box-sizing: border-box;
-      background: rgba(255, 255, 255, 0.96);
-      color: #0284c7;
-      border: 1px solid rgba(2, 132, 199, 0.45);
-      border-radius: 10px;
-      min-width: 24px;
-      min-height: 24px;
-      padding: 2px 5px;
-      font-size: 10px;
-      font-weight: 700;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-      cursor: pointer;
-      pointer-events: auto;
-      user-select: none;
-      -webkit-user-select: none;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      white-space: nowrap;
-      transition: transform 0.12s ease;
-    }
-    .translation-mini-pill:active {
-      transform: scale(0.92);
-      background: #f0f9ff;
     }
   </style>
   <script>
@@ -379,6 +343,160 @@ ${pdfJsCode}
         }
       }
 
+      function sampleCanvasColor(cv, leftPct, topPct, widthPct, heightPct) {
+        if (!cv) return { bg: 'rgba(255, 255, 255, 0.96)', text: '#111827', shadow: 'none' };
+        try {
+          var ctx = cv.getContext('2d');
+          var rx = Math.max(0, Math.min(cv.width - 2, Math.floor((leftPct / 100) * cv.width)));
+          var ry = Math.max(0, Math.min(cv.height - 2, Math.floor((topPct / 100) * cv.height)));
+          var rw = Math.max(2, Math.min(cv.width - rx, Math.floor((widthPct / 100) * cv.width)));
+          var rh = Math.max(2, Math.min(cv.height - ry, Math.floor((heightPct / 100) * cv.height)));
+
+          var pts = [
+            [rx + 1, ry + 1],
+            [rx + rw - 2, ry + 1],
+            [rx + 1, ry + rh - 2],
+            [rx + rw - 2, ry + rh - 2],
+            [rx + Math.floor(rw / 2), ry + 1],
+            [rx + Math.floor(rw / 2), ry + rh - 2],
+            [rx + 1, ry + Math.floor(rh / 2)],
+            [rx + rw - 2, ry + Math.floor(rh / 2)]
+          ];
+          var tr = 0, tg = 0, tb = 0, count = 0;
+          for (var i = 0; i < pts.length; i++) {
+            var px = Math.max(0, Math.min(cv.width - 1, pts[i][0]));
+            var py = Math.max(0, Math.min(cv.height - 1, pts[i][1]));
+            var p = ctx.getImageData(px, py, 1, 1).data;
+            if (p[3] > 40) {
+              tr += p[0]; tg += p[1]; tb += p[2]; count++;
+            }
+          }
+          if (count === 0) return { bg: 'rgba(255, 255, 255, 0.96)', text: '#111827', shadow: 'none' };
+          var ar = Math.round(tr / count);
+          var ag = Math.round(tg / count);
+          var ab = Math.round(tb / count);
+          var lum = 0.299 * ar + 0.587 * ag + 0.114 * ab;
+
+          if (lum > 165) {
+            return {
+              bg: 'rgba(' + ar + ',' + ag + ',' + ab + ', 0.96)',
+              text: '#111827',
+              shadow: 'none'
+            };
+          } else if (lum < 85) {
+            return {
+              bg: 'rgba(' + ar + ',' + ag + ',' + ab + ', 0.94)',
+              text: '#f8fafc',
+              shadow: 'none'
+            };
+          } else {
+            var isDark = lum < 128;
+            var textColor = isDark ? '#ffffff' : '#0f172a';
+            var halo = isDark ? 'rgba(0,0,0,0.85)' : 'rgba(255,255,255,0.85)';
+            return {
+              bg: 'rgba(' + ar + ',' + ag + ',' + ab + ', 0.90)',
+              text: textColor,
+              shadow: '0 0 2px ' + halo
+            };
+          }
+        } catch (e) {
+          return { bg: 'rgba(255, 255, 255, 0.96)', text: '#111827', shadow: 'none' };
+        }
+      }
+
+      // Restore only the original lettering area using neighbouring pixels.
+      // The PDF canvas remains untouched, so switching off always restores it.
+      function cleanOriginalLettering(cv, overlay, b, region, wrapperW, wrapperH) {
+        if (!cv) return;
+        try {
+          var pad = 4;
+          var x = Math.max(0, Math.floor(region.left / 100 * cv.width) - pad);
+          var y = Math.max(0, Math.floor(region.top / 100 * cv.height) - pad);
+          var w = Math.min(cv.width - x, Math.ceil(region.width / 100 * cv.width) + pad * 2);
+          var h = Math.min(cv.height - y, Math.ceil(region.height / 100 * cv.height) + pad * 2);
+          if (w < 3 || h < 3 || w * h > 1000000) return;
+          var source = cv.getContext('2d').getImageData(x, y, w, h);
+          var pixels = source.data;
+          var mask = new Uint8Array(w * h), queued = new Uint8Array(w * h);
+          var chars = (b.chars || []).filter(function(c) {
+            return c.box && c.box.length === 4 && (c.score === undefined || c.score >= 0.35) &&
+              c.box[2] > x && c.box[0] < x + w && c.box[3] > y && c.box[1] < y + h;
+          });
+          function mark(x0, y0, x1, y1) {
+            for (var py = Math.max(1, Math.floor(y0)); py < Math.min(h - 1, Math.ceil(y1)); py++) {
+              for (var px = Math.max(1, Math.floor(x0)); px < Math.min(w - 1, Math.ceil(x1)); px++) mask[py * w + px] = 1;
+            }
+          }
+          if (chars.length) chars.forEach(function(c) { mark(c.box[0] - x - 2, c.box[1] - y - 2, c.box[2] - x + 2, c.box[3] - y + 2); });
+          else mark(pad - 1, pad - 1, w - pad + 1, h - pad + 1);
+          var queue = [];
+          for (var i = w + 1; i < mask.length - w - 1; i++) {
+            if (mask[i] && (!mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w])) { queue.push(i); queued[i] = 1; }
+          }
+          for (var head = 0; head < queue.length; head++) {
+            var at = queue[head], neighbours = [at - 1, at + 1, at - w, at + w];
+            var rgb = [0, 0, 0], count = 0;
+            neighbours.forEach(function(n) {
+              if (n >= 0 && n < mask.length && !mask[n]) {
+                for (var c = 0; c < 3; c++) rgb[c] += pixels[n * 4 + c];
+                count++;
+              }
+            });
+            if (!count) continue;
+            for (var c = 0; c < 3; c++) pixels[at * 4 + c] = Math.round(rgb[c] / count);
+            mask[at] = 0;
+            neighbours.forEach(function(n) {
+              if (n >= 0 && n < mask.length && mask[n] && !queued[n]) { queued[n] = 1; queue.push(n); }
+            });
+          }
+          var patch = document.createElement('canvas');
+          patch.className = 'translation-cleanup-patch';
+          patch.width = w; patch.height = h;
+          patch.getContext('2d').putImageData(source, 0, 0);
+          patch.style.cssText = 'position:absolute;pointer-events:none;z-index:0;';
+          patch.style.left = (x / cv.width * wrapperW) + 'px';
+          patch.style.top = (y / cv.height * wrapperH) + 'px';
+          patch.style.width = (w / cv.width * wrapperW) + 'px';
+          patch.style.height = (h / cv.height * wrapperH) + 'px';
+          overlay.appendChild(patch);
+          return true;
+        } catch (error) { return false; }
+      }
+
+      function estimateSourceFontSize(b, scaleToCss, boxPixelH) {
+        if (Array.isArray(b.chars) && b.chars.length > 0) {
+          var sizes = [];
+          
+          for (var i = 0; i < b.chars.length; i++) {
+            var c = b.chars[i];
+            if (!c || !c.box || c.box.length < 4) continue;
+            var ch = (c.char || '').trim();
+            if (!ch || /^[、。！？!?…・ーっッ〜~()（）『』「」\s]+$/.test(ch)) continue;
+            if (typeof c.score === 'number' && c.score < 0.35) continue;
+            var gh = Math.abs(c.box[3] - c.box[1]);
+            var dim = gh;
+            if (dim > 4 && dim < 180) {
+              sizes.push(dim);
+            }
+          }
+          if (sizes.length > 0) {
+            sizes.sort(function(a, b) { return a - b; });
+            var med = sizes[Math.floor(sizes.length / 2)];
+            var css = med * scaleToCss;
+            if (css >= 5 && css <= 40) return css;
+          }
+        }
+        if (typeof b.fontSize === 'number' && b.fontSize > 3) {
+          var fsFromB = b.fontSize * scaleToCss;
+          if (fsFromB >= 5 && fsFromB <= 40) return fsFromB;
+        }
+        var srcLen = Math.max(1, (b.sourceText || '').trim().length);
+        if (b.direction === 'vertical') {
+          return Math.max(6, Math.min(24, (boxPixelH / srcLen) * 0.95));
+        }
+        return Math.max(6, Math.min(24, boxPixelH * 0.75));
+      }
+
       function renderBubbleOverlay(bubbles, visible) {
         var overlay = document.getElementById('bubble-overlay');
         if (!overlay) return;
@@ -403,52 +521,170 @@ ${pdfJsCode}
           }
           var left = Math.max(0, Math.min(100, box.x * sx));
           var top = Math.max(0, Math.min(100, box.y * sy));
-          return { left: left, top: top,
+          return {
+            left: left,
+            top: top,
             width: Math.max(0, Math.min(100 - left, box.width * sx)),
-            height: Math.max(0, Math.min(100 - top, box.height * sy)) };
+            height: Math.max(0, Math.min(100 - top, box.height * sy))
+          };
         }
+
         var regions = bubbles.map(percentBox);
+
         bubbles.forEach(function(b, index) {
           var region = regions[index];
           var targetText = (b.targetText || '').trim();
+          // 加载期间保留原图；未识别/失败或未就绪时不画假译文覆盖层
           if (!region || !targetText) return;
-          var left = region.left, top = region.top, width = region.width, height = region.height;
 
-          var boxPixelW = (width / 100) * wrapperW;
-          var boxPixelH = (height / 100) * wrapperH;
+          var left = region.left;
+          var top = region.top;
+          var width = region.width;
+          var height = region.height;
 
-          // 过小区域（宽度或高度过小，无法容纳文字且容易遮挡小画面）使用轻量胶囊入口
-          var isMiniEntry = (boxPixelW < 8 || boxPixelH < 18 || (boxPixelW * boxPixelH < 120));
+          var refW = b.refWidth || cvW || 600;
+          var scaleToCss = wrapperW / refW;
+
+          var origX = (left / 100) * wrapperW;
+          var origY = (top / 100) * wrapperH;
+          var origW = (width / 100) * wrapperW;
+          var origH = (height / 100) * wrapperH;
+
+          var isVert = (b.direction === 'vertical');
+          var sourceFs = estimateSourceFontSize(b, scaleToCss, origH);
+          var initialFs = Math.max(6, Math.min(32, Math.round(sourceFs)));
+
+          // 采样 canvas 底色并判定最佳文字对比度
+          var colorInfo = sampleCanvasColor(cv, left, top, width, height);
 
           var el = document.createElement('div');
+          el.className = 'translation-overlay-box';
           el.setAttribute('role', 'button');
           el.setAttribute('tabindex', '0');
           el.setAttribute('aria-label', '查看译文和原文：' + targetText);
-          if (isMiniEntry) {
-            el.className = 'translation-mini-pill';
-            el.style.left = left + '%';
-            el.style.top = top + '%';
-            el.innerText = '译';
-          } else {
-            el.className = 'translation-overlay-box';
-            el.style.left = left + '%';
-            el.style.top = top + '%';
-            el.style.width = width + '%';
-            el.style.height = height + '%';
+          var cleaned = cleanOriginalLettering(cv, overlay, b, region, wrapperW, wrapperH);
+          el.style.backgroundColor = cleaned ? 'transparent' : colorInfo.bg;
+          el.style.zIndex = '1';
+          el.dataset.sourceFontSize = sourceFs.toFixed(2);
 
-            var span = document.createElement('span');
-            span.className = 'translation-text-content';
-            span.textContent = targetText;
-            if (b.direction === 'vertical' && boxPixelH > boxPixelW * 1.6) {
-              span.style.writingMode = 'vertical-rl';
-              span.style.textOrientation = 'upright';
-              span.style.width = 'auto';
-              span.style.height = '100%';
-              span.style.lineHeight = '1.15';
-              el.style.padding = '0';
-            }
-            el.appendChild(span);
+          var span = document.createElement('span');
+          span.className = 'translation-text-content';
+          span.textContent = targetText;
+          span.style.color = colorInfo.text;
+          if (b.textType === 'free_text' || b.textType === 'sfx') {
+            span.style.color = '#171717';
+            span.style.paintOrder = 'stroke fill';
+            span.style.webkitTextStroke = Math.max(0.45, initialFs * 0.09) + 'px rgba(255,255,255,0.95)';
           }
+
+          if (isVert) {
+            span.style.writingMode = 'vertical-rl';
+            span.style.height = '100%';
+            span.style.textOrientation = 'mixed';
+            span.style.lineHeight = '1.18';
+          } else {
+            span.style.writingMode = 'horizontal-tb';
+            span.style.width = '100%';
+            span.style.lineHeight = '1.25';
+          }
+
+          el.appendChild(span);
+          overlay.appendChild(el);
+
+          // 计算邻近文字区域边界，留出安全隔离间距
+          var safeLeft = 0, safeRight = wrapperW;
+          var safeTop = 0, safeBottom = wrapperH;
+          for (var oi = 0; oi < regions.length; oi++) {
+            var other = regions[oi];
+            if (!other || oi === index) continue;
+            var oL = (other.left / 100) * wrapperW;
+            var oR = ((other.left + other.width) / 100) * wrapperW;
+            var oT = (other.top / 100) * wrapperH;
+            var oB = ((other.top + other.height) / 100) * wrapperH;
+
+            // 纵向重叠区域
+            if (oT < origY + origH + 2 && oB > origY - 2) {
+              if (oR <= origX) safeLeft = Math.max(safeLeft, (oR + origX) / 2);
+              if (oL >= origX + origW) safeRight = Math.min(safeRight, (oL + origX + origW) / 2);
+            }
+            // 横向重叠区域
+            if (oL < origX + origW + 2 && oR > origX - 2) {
+              if (oB <= origY) safeTop = Math.max(safeTop, (oB + origY) / 2);
+              if (oT >= origY + origH) safeBottom = Math.min(safeBottom, (oT + origY + origH) / 2);
+            }
+          }
+
+          function checkFits() {
+            return span.scrollHeight <= el.clientHeight && span.scrollWidth <= el.clientWidth;
+          }
+
+          var curW = Math.max(12, origW);
+          var curH = Math.max(12, origH);
+          var curL = origX;
+          var curT = origY;
+          var curFs = initialFs;
+
+          el.style.left = curL + 'px';
+          el.style.top = curT + 'px';
+          el.style.width = curW + 'px';
+          el.style.height = curH + 'px';
+          span.style.fontSize = curFs + 'px';
+
+          if (!checkFits()) {
+            if (isVert) {
+              // 竖排文本：适度横向加列展开
+              var maxAllowedW = Math.min(safeRight - safeLeft, Math.max(curW, Math.min(origW * 2.8, origW + 48)));
+              var deltaW = maxAllowedW - curW;
+              curL = Math.max(safeLeft, Math.min(safeRight - maxAllowedW, origX - deltaW * 0.6));
+              curW = maxAllowedW;
+              var maxAllowedH = Math.min(safeBottom - safeTop, Math.max(curH, origH + 16));
+              curT = Math.max(safeTop, Math.min(safeBottom - maxAllowedH, origY - 4));
+              curH = maxAllowedH;
+            } else {
+              // 横排文本：纵向适度换行展开
+              var maxAllowedH = Math.min(safeBottom - safeTop, Math.max(curH, origH * 2.2));
+              var maxAllowedW = Math.min(safeRight - safeLeft, Math.max(curW, origW + 28));
+              curL = Math.max(safeLeft, Math.min(safeRight - maxAllowedW, origX - (maxAllowedW - curW) / 2));
+              curT = Math.max(safeTop, Math.min(safeBottom - maxAllowedH, origY));
+              curW = maxAllowedW;
+              curH = maxAllowedH;
+            }
+
+            el.style.left = curL + 'px';
+            el.style.top = curT + 'px';
+            el.style.width = curW + 'px';
+            el.style.height = curH + 'px';
+
+            // 仍超出时，适度步进微调字号
+            var minAllowedFs = Math.max(6, initialFs * 0.85);
+            while (!checkFits() && curFs > minAllowedFs) {
+              curFs -= 0.5;
+              span.style.fontSize = curFs + 'px';
+            }
+
+            // 确保文字完全展示，不截断不丢失
+            if (!checkFits()) {
+              if (span.scrollHeight > el.clientHeight) {
+                var newH = Math.min(safeBottom - curT, span.scrollHeight + 2);
+                el.style.height = newH + 'px';
+              }
+              if (span.scrollWidth > el.clientWidth) {
+                var newW = Math.min(safeRight - curL, span.scrollWidth + 2);
+                el.style.width = newW + 'px';
+              }
+            }
+          }
+
+          if (!checkFits()) {
+            el.style.overflow = 'visible';
+          }
+          el.dataset.renderFontSize = curFs.toFixed(2);
+
+          // 页面边缘 clamp
+          var finalL = Math.max(0, Math.min(wrapperW - parseFloat(el.style.width || curW), parseFloat(el.style.left || curL)));
+          var finalT = Math.max(0, Math.min(wrapperH - parseFloat(el.style.height || curH), parseFloat(el.style.top || curT)));
+          el.style.left = finalL + 'px';
+          el.style.top = finalT + 'px';
 
           function showTranslation(e) {
             e.stopPropagation();
@@ -462,55 +698,12 @@ ${pdfJsCode}
           el.addEventListener('keydown', function(e) {
             if (e.key === 'Enter' || e.key === ' ') showTranslation(e);
           });
-
-          overlay.appendChild(el);
-          if (!isMiniEntry) {
-            // Measure real wrapping after insertion; area estimates alone can clip narrow columns.
-            var inset = el.style.padding === '0px' || el.style.padding === '0' ? 0 : 4;
-            function fitText() {
-              for (var size = 16; size >= 11; size -= 0.5) {
-                span.style.fontSize = size + 'px';
-                if (span.scrollHeight <= el.clientHeight - inset && span.scrollWidth <= el.clientWidth - inset) return true;
-              }
-              return false;
-            }
-            var fits = fitText();
-            if (!fits) {
-              // OCR bounds hug the original glyphs. Allow modest extra width,
-              // stopping halfway to neighbouring text in the same vertical band.
-              var x = left / 100 * wrapperW;
-              var safeLeft = 0, safeRight = wrapperW;
-              regions.forEach(function(other, otherIndex) {
-                if (!other || index === otherIndex || other.top >= top + height || other.top + other.height <= top) return;
-                var otherLeft = other.left / 100 * wrapperW;
-                var otherRight = (other.left + other.width) / 100 * wrapperW;
-                if (otherRight <= x) safeLeft = Math.max(safeLeft, (otherRight + x) / 2);
-                if (otherLeft >= x + boxPixelW) safeRight = Math.min(safeRight, (otherLeft + x + boxPixelW) / 2);
-              });
-              var expandedW = Math.min(safeRight - safeLeft, Math.max(boxPixelW, Math.min(56, boxPixelW + 24, boxPixelW * 2.5)));
-              if (expandedW > boxPixelW) {
-                el.style.width = expandedW + 'px';
-                el.style.left = Math.max(safeLeft, Math.min(safeRight - expandedW, x + (boxPixelW - expandedW) / 2)) + 'px';
-                fits = fitText();
-              }
-            }
-            if (!fits) {
-              el.className = 'translation-mini-pill';
-              el.style.width = '';
-              el.style.height = '';
-              el.textContent = '译';
-            }
-          }
-          if (el.className === 'translation-mini-pill') {
-            el.style.left = Math.max(0, Math.min(wrapperW - 24, left / 100 * wrapperW)) + 'px';
-            el.style.top = Math.max(0, Math.min(wrapperH - 24, top / 100 * wrapperH)) + 'px';
-          }
         });
       }
 
       // Tap listener for pagination & menu toggle
       document.addEventListener('click', function(e) {
-        if (e.target && e.target.closest && (e.target.closest('.translation-overlay-box') || e.target.closest('.translation-mini-pill'))) {
+        if (e.target && e.target.closest && e.target.closest('.translation-overlay-box')) {
           return; // 拦截气泡内点击，防止误触发翻页或菜单
         }
         var width = window.innerWidth || document.documentElement.clientWidth;
