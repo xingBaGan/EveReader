@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { ChevronLeft, List, Bookmark, Search, SlidersHorizontal, MessageSquare } from 'lucide-react-native';
+import { ChevronLeft, List, Bookmark, Search, SlidersHorizontal, Languages } from 'lucide-react-native';
 import { useReaderStore } from '../../stores/useReaderStore';
 import { READER_THEMES } from '../../types/reader';
 
@@ -21,6 +21,7 @@ export function ReaderTopBar() {
   const toggleBubbleDetection = useReaderStore((s) => s.toggleBubbleDetection);
 
   const themeConfig = READER_THEMES[settings.theme] || READER_THEMES.light;
+  const isPdf = currentBook?.extension.toLowerCase() === 'pdf';
   const isBookmarked = bookmarks.some(
     (b) => b.bookId === currentBook?.id && b.cfiOrLocation === currentCfi
   );
@@ -68,18 +69,33 @@ export function ReaderTopBar() {
             />
           </Pressable>
 
-          {/* 气泡检测快捷切换按钮 */}
-          <Pressable
-            style={[styles.iconBtn, isBubbleDetectActive && styles.activeIconBtn]}
-            onPress={() => toggleBubbleDetection()}
-            hitSlop={8}>
-            <MessageSquare
-              size={20}
-              color={isBubbleDetectActive ? '#38bdf8' : themeConfig.barText}
-              fill={isBubbleDetectActive ? 'rgba(56, 189, 248, 0.2)' : 'none'}
-            />
-            {isBubbleDetectActive ? <View style={styles.activeDot} /> : null}
-          </Pressable>
+          {/* 仅在 PDF 漫画阅读模式显示清晰状态的翻译开关 */}
+          {isPdf ? (
+            <Pressable
+              accessibilityRole="switch"
+              accessibilityState={{ checked: isBubbleDetectActive }}
+              accessibilityLabel="漫画翻译开关"
+              style={[
+                styles.translateSwitchBtn,
+                isBubbleDetectActive
+                  ? styles.translateSwitchActive
+                  : styles.translateSwitchInactive,
+              ]}
+              onPress={() => toggleBubbleDetection()}
+              hitSlop={6}>
+              <Languages
+                size={15}
+                color={isBubbleDetectActive ? '#0284c7' : themeConfig.barText}
+              />
+              <Text
+                style={[
+                  styles.translateSwitchText,
+                  { color: isBubbleDetectActive ? '#0284c7' : themeConfig.barText },
+                ]}>
+                {isBubbleDetectActive ? '翻译 开' : '翻译 关'}
+              </Text>
+            </Pressable>
+          ) : null}
 
           <Pressable style={styles.iconBtn} onPress={() => setIsSearchOpen(true)}>
             <Search size={20} color={themeConfig.barText} />
@@ -122,17 +138,27 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     position: 'relative',
   },
-  activeIconBtn: {
-    backgroundColor: 'rgba(56, 189, 248, 0.15)',
+  translateSwitchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 14,
+    gap: 4,
+    marginRight: 4,
   },
-  activeDot: {
-    position: 'absolute',
-    top: 6,
-    right: 6,
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#38bdf8',
+  translateSwitchActive: {
+    backgroundColor: 'rgba(56, 189, 248, 0.16)',
+    borderWidth: 1,
+    borderColor: '#38bdf8',
+  },
+  translateSwitchInactive: {
+    borderWidth: 1,
+    borderColor: 'rgba(148, 163, 184, 0.28)',
+  },
+  translateSwitchText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
   titleArea: {
     flex: 1,

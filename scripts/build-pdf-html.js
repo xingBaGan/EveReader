@@ -87,74 +87,65 @@ const clientHtml = `<!DOCTYPE html>
       pointer-events: none;
       z-index: 10;
     }
-    .bubble-box {
+    .translation-overlay-box {
       position: absolute;
       box-sizing: border-box;
-      border-radius: 8px;
-      pointer-events: auto;
-      cursor: pointer;
-      transition: transform 0.15s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+      background: #fff;
+      color: #0f172a;
+      border-radius: 4px;
+      border: 1px solid rgba(0, 0, 0, 0.12);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16);
+      padding: 2px;
       display: flex;
-      flex-direction: column;
-      justify-content: flex-start;
-      align-items: flex-start;
-    }
-    .bubble-box:active {
-      transform: scale(0.96);
-    }
-    /* 对话气泡 (蓝色光晕) */
-    .bubble-type-bubble {
-      border: 2px solid #38bdf8;
-      background: rgba(56, 189, 248, 0.16);
-      box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
-    }
-    /* 拟声动效词 (玫红虚线框) */
-    .bubble-type-sfx {
-      border: 2px dashed #f43f5e;
-      background: rgba(244, 63, 94, 0.16);
-      box-shadow: 0 0 8px rgba(244, 63, 94, 0.35);
-    }
-    /* 画面大标题 (金橙加粗框) */
-    .bubble-type-title {
-      border: 2.5px solid #ea580c;
-      background: rgba(234, 88, 12, 0.18);
-      box-shadow: 0 0 12px rgba(234, 88, 12, 0.45);
-    }
-    /* 旁白/嵌字 (紫色精细框) */
-    .bubble-type-free_text {
-      border: 2px solid #8b5cf6;
-      background: rgba(139, 92, 246, 0.16);
-      box-shadow: 0 0 8px rgba(139, 92, 246, 0.35);
-    }
-    .bubble-badge {
-      display: inline-flex;
       align-items: center;
       justify-content: center;
-      background: #0284c7;
-      color: #ffffff;
-      font-size: 11px;
-      font-weight: 700;
-      padding: 1px 6px;
-      border-radius: 6px;
-      margin: 2px;
-      box-shadow: 0 1px 4px rgba(0,0,0,0.5);
-      line-height: 14px;
+      text-align: center;
+      overflow: hidden;
+      cursor: pointer;
+      pointer-events: auto;
+      user-select: none;
+      -webkit-user-select: none;
+      transition: transform 0.12s ease, background-color 0.15s ease;
     }
-    .bubble-type-sfx .bubble-badge {
-      background: #e11d48;
+    .translation-overlay-box:active {
+      transform: scale(0.97);
+      background: #f1f5f9;
     }
-    .bubble-type-title .bubble-badge {
-      background: #ea580c;
+    .translation-text-content {
+      display: block;
+      width: 100%;
+      overflow-wrap: anywhere;
+      line-height: 1.25;
+      font-weight: 500;
+      color: #0f172a;
+      letter-spacing: 0;
     }
-    .bubble-type-free_text .bubble-badge {
-      background: #7c3aed;
-    }
-    .bubble-tag {
+    .translation-mini-pill {
+      position: absolute;
+      box-sizing: border-box;
+      background: rgba(255, 255, 255, 0.96);
+      color: #0284c7;
+      border: 1px solid rgba(2, 132, 199, 0.45);
+      border-radius: 10px;
+      min-width: 28px;
+      min-height: 28px;
+      padding: 2px 5px;
       font-size: 10px;
-      font-weight: 600;
-      color: #ffffff;
-      opacity: 0.9;
-      margin-left: 2px;
+      font-weight: 700;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+      cursor: pointer;
+      pointer-events: auto;
+      user-select: none;
+      -webkit-user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      white-space: nowrap;
+      transition: transform 0.12s ease;
+    }
+    .translation-mini-pill:active {
+      transform: scale(0.92);
+      background: #f0f9ff;
     }
   </style>
   <script>
@@ -397,14 +388,18 @@ ${pdfJsCode}
         var cv = document.querySelector('canvas');
         var cvW = cv ? cv.width : 600;
         var cvH = cv ? cv.height : 800;
+        var wrapperW = overlay.clientWidth || (cv ? Math.floor(cv.width / (window.devicePixelRatio || 1)) : 360);
+        var wrapperH = overlay.clientHeight || (cv ? Math.floor(cv.height / (window.devicePixelRatio || 1)) : 500);
 
-        bubbles.forEach(function(b, idx) {
+        bubbles.forEach(function(b) {
           var box = b.box;
           if (!box) return;
 
-          var el = document.createElement('div');
-          var typeClass = 'bubble-type-' + (b.textType || 'bubble');
-          el.className = 'bubble-box ' + typeClass;
+          var targetText = (b.targetText || '').trim();
+          // 加载期间保留原图；未识别/失败或未就绪时不画假译文覆盖层
+          if (!targetText) {
+            return;
+          }
 
           var leftPct, topPct, widthPct, heightPct;
 
@@ -430,33 +425,85 @@ ${pdfJsCode}
             heightPct = (box.height / refH) * 100;
           }
 
-          el.style.left = Math.max(0, Math.min(100, leftPct)) + '%';
-          el.style.top = Math.max(0, Math.min(100, topPct)) + '%';
-          el.style.width = Math.max(0, Math.min(100, widthPct)) + '%';
-          el.style.height = Math.max(0, Math.min(100, heightPct)) + '%';
+          var left = Math.max(0, Math.min(100, leftPct));
+          var top = Math.max(0, Math.min(100, topPct));
+          var width = Math.max(0, Math.min(100 - left, widthPct));
+          var height = Math.max(0, Math.min(100 - top, heightPct));
 
-          var badge = document.createElement('span');
-          badge.className = 'bubble-badge';
-          var orderText = '#' + (b.readingOrderIndex || (idx + 1));
-          var labelText = b.textType === 'title' ? ' 标题' : (b.textType === 'sfx' ? ' 拟声' : '');
-          badge.innerText = orderText + labelText;
-          el.appendChild(badge);
+          var boxPixelW = (width / 100) * wrapperW;
+          var boxPixelH = (height / 100) * wrapperH;
 
-          el.addEventListener('click', function(e) {
+          // 过小区域（宽度或高度过小，无法容纳文字且容易遮挡小画面）使用轻量胶囊入口
+          var isMiniEntry = (boxPixelW < 14 || boxPixelH < 18 || (boxPixelW * boxPixelH < 200));
+
+          var el = document.createElement('div');
+          el.setAttribute('role', 'button');
+          el.setAttribute('tabindex', '0');
+          el.setAttribute('aria-label', '查看译文和原文：' + targetText);
+          if (isMiniEntry) {
+            el.className = 'translation-mini-pill';
+            el.style.left = left + '%';
+            el.style.top = top + '%';
+            el.innerText = '译';
+          } else {
+            el.className = 'translation-overlay-box';
+            el.style.left = left + '%';
+            el.style.top = top + '%';
+            el.style.width = width + '%';
+            el.style.height = height + '%';
+
+            var span = document.createElement('span');
+            span.className = 'translation-text-content';
+            span.textContent = targetText;
+            if (b.direction === 'vertical' && boxPixelH > boxPixelW * 1.6) {
+              span.style.writingMode = 'vertical-rl';
+              span.style.textOrientation = 'upright';
+              span.style.width = 'auto';
+              span.style.height = '100%';
+              span.style.lineHeight = '1.15';
+              el.style.padding = '0';
+            }
+            el.appendChild(span);
+          }
+
+          function showTranslation(e) {
             e.stopPropagation();
+            e.preventDefault();
             sendToParent({
               type: 'bubblePressed',
               bubble: b
             });
+          }
+          el.addEventListener('click', showTranslation);
+          el.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' || e.key === ' ') showTranslation(e);
           });
 
           overlay.appendChild(el);
+          if (!isMiniEntry) {
+            // Measure real wrapping after insertion; area estimates alone can clip narrow columns.
+            var fits = false;
+            var inset = el.style.padding === '0px' || el.style.padding === '0' ? 0 : 4;
+            for (var size = 16; size >= 11; size -= 0.5) {
+              span.style.fontSize = size + 'px';
+              if (span.scrollHeight <= el.clientHeight - inset && span.scrollWidth <= el.clientWidth - inset) {
+                fits = true;
+                break;
+              }
+            }
+            if (!fits) {
+              el.className = 'translation-mini-pill';
+              el.style.width = '';
+              el.style.height = '';
+              el.textContent = '译';
+            }
+          }
         });
       }
 
       // Tap listener for pagination & menu toggle
       document.addEventListener('click', function(e) {
-        if (e.target && e.target.closest && e.target.closest('.bubble-box')) {
+        if (e.target && e.target.closest && (e.target.closest('.translation-overlay-box') || e.target.closest('.translation-mini-pill'))) {
           return; // 拦截气泡内点击，防止误触发翻页或菜单
         }
         var width = window.innerWidth || document.documentElement.clientWidth;
@@ -625,6 +672,7 @@ ${pdfJsCode}
         } else if (data.action === 'applySettings') {
           window.PdfReaderApi.applySettings(data.settings);
         } else if (data.action === 'setDetectedBubbles' || data.action === 'detectionCompleted') {
+          if (!isBubbleDetectionActive) return;
           // 时序与版本保护：只有匹配当前 activeDetectionReqId 且匹配当前页码的 ACK 才能释放锁并更新 overlay
           // 旧 request 或旧页面的迟到 ACK 严禁污染当前页面！
           if (data.requestId && activeDetectionReqId && data.requestId !== activeDetectionReqId) {
@@ -637,7 +685,6 @@ ${pdfJsCode}
           }
           isSnapshotInFlight = false;
           currentBubbles = data.bubbles || [];
-          isBubbleDetectionActive = Boolean(data.active !== undefined ? data.active : true);
           // 明确清空/更新 overlay，0 结果时清空旧定位框，绝不沉默残留！
           renderBubbleOverlay(currentBubbles, isBubbleDetectionActive);
         } else if (data.action === 'detectionFailed') {

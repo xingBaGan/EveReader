@@ -5,10 +5,11 @@ import {
   Text,
   StyleSheet,
   Pressable,
+  ScrollView,
   ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, Copy, Check, MessageSquare, Sparkles, Volume2, Bookmark, RefreshCw } from 'lucide-react-native';
+import { X, RefreshCw } from 'lucide-react-native';
 import { TextBubble } from '../../types/manga';
 import { useReaderStore } from '../../stores/useReaderStore';
 
@@ -25,44 +26,20 @@ export const BubbleDetailModal: React.FC<Props> = ({
   onClose,
   onRetryTranslate,
 }) => {
-  const [copied, setCopied] = React.useState(false);
   const insets = useSafeAreaInsets();
   const settings = useReaderStore((s) => s.settings);
   const isDark = settings.theme === 'dark' || settings.theme === 'black';
 
   if (!bubble) return null;
 
-  const handleCopy = () => {
-    // In React Native web / native
-    try {
-      if (typeof navigator !== 'undefined' && navigator.clipboard) {
-        navigator.clipboard.writeText(bubble.sourceText);
-      }
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {}
-  };
-
-  const getCategoryMeta = (type?: string) => {
-    switch (type) {
-      case 'title':
-        return { label: '画面大标题', color: '#ea580c', icon: Sparkles };
-      case 'sfx':
-        return { label: '拟声动效词', color: '#dc2626', icon: Volume2 };
-      case 'free_text':
-        return { label: '旁白/嵌字', color: '#8b5cf6', icon: Bookmark };
-      default:
-        return { label: '对话气泡', color: '#0284c7', icon: MessageSquare };
-    }
-  };
-
-  const meta = getCategoryMeta(bubble.textType);
-  const IconComponent = meta.icon;
+  const isTranslating = bubble.translationStatus === 'translating';
+  const isError = bubble.translationStatus === 'error';
+  const hasTarget = Boolean(bubble.targetText && bubble.targetText.trim().length > 0);
 
   return (
     <Modal
       transparent
-      animationType="fade"
+      animationType="slide"
       visible={visible}
       onRequestClose={onClose}>
       <Pressable style={styles.backdrop} onPress={onClose}>
@@ -75,166 +52,183 @@ export const BubbleDetailModal: React.FC<Props> = ({
             },
           ]}
           onPress={(e) => e.stopPropagation()}>
-          {/* Header */}
+          {/* Top Drag Indicator & Header */}
+          <View style={styles.dragHandleContainer}>
+            <View
+              style={[
+                styles.dragHandle,
+                { backgroundColor: isDark ? '#475569' : '#cbd5e1' },
+              ]}
+            />
+          </View>
+
           <View style={styles.header}>
-            <View style={styles.badgeRow}>
-              <View style={[styles.orderBadge, { backgroundColor: meta.color }]}>
-                <Text style={styles.orderBadgeText}>#{bubble.readingOrderIndex}</Text>
-              </View>
-
-              <View style={[styles.typeBadge, { borderColor: meta.color }]}>
-                <IconComponent size={13} color={meta.color} style={{ marginRight: 4 }} />
-                <Text style={[styles.typeBadgeText, { color: meta.color }]}>
-                  {meta.label}
-                </Text>
-              </View>
-
-              <View style={styles.dirBadge}>
-                <Text style={styles.dirBadgeText}>
-                  {bubble.direction === 'vertical' ? '竖排' : '横排'}
-                </Text>
-              </View>
-
-              {bubble.confidence ? (
-                <Text style={styles.confidenceText}>
-                  {(bubble.confidence * 100).toFixed(0)}% 置信度
-                </Text>
-              ) : null}
-            </View>
-
-            <Pressable onPress={onClose} style={styles.closeBtn} hitSlop={12}>
+            <Text style={[styles.headerTitle, { color: isDark ? '#f1f5f9' : '#0f172a' }]}>
+              翻译详情
+            </Text>
+            <Pressable
+              onPress={onClose}
+              style={styles.closeBtn}
+              hitSlop={12}
+              accessibilityRole="button"
+              accessibilityLabel="关闭详情面板">
               <X size={20} color={isDark ? '#94a3b8' : '#64748b'} />
             </Pressable>
           </View>
 
-          {/* OCR Source Text (日文/外语原文) */}
-          <View style={styles.section}>
-            <View style={styles.sectionHeader}>
-              <Text style={[styles.sectionLabel, { color: isDark ? '#94a3b8' : '#64748b' }]}>
-                OCR 识别原文
-              </Text>
-              <Pressable style={styles.copyBtn} onPress={handleCopy}>
-                {copied ? (
-                  <>
-                    <Check size={14} color="#10b981" />
-                    <Text style={[styles.copyBtnText, { color: '#10b981' }]}>已复制</Text>
-                  </>
-                ) : (
-                  <>
-                    <Copy size={14} color="#0284c7" />
-                    <Text style={[styles.copyBtnText, { color: '#0284c7' }]}>复制</Text>
-                  </>
-                )}
-              </Pressable>
-            </View>
-            <View
-              style={[
-                styles.textBox,
-                {
-                  backgroundColor: isDark ? '#27292d' : '#f8fafc',
-                  borderColor: isDark ? '#374151' : '#e2e8f0',
-                },
-              ]}>
-              <Text style={[styles.sourceText, { color: isDark ? '#f1f5f9' : '#0f172a' }]}>
-                {bubble.sourceText || '气泡已由 Canvas 视觉引擎定位。文字识别提取需原生端侧 Manga-OCR 模块或在线 OCR 接口。'}
-              </Text>
-            </View>
-          </View>
+          <ScrollView
+            style={styles.scrollArea}
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}>
+            {/* Primary Section: 译文优先 */}
+            <View style={styles.section}>
+              <View style={styles.sectionHeader}>
+                <Text
+                  style={[
+                    styles.sectionLabel,
+                    { color: isDark ? '#38bdf8' : '#0284c7' },
+                  ]}>
+                  中文译文
+                </Text>
 
-          {/* Target Translation (中文译文预览与状态) */}
-          <View style={styles.section}>
-            <View style={styles.sectionHeader}>
-              <Text style={[styles.sectionLabel, { color: isDark ? '#94a3b8' : '#64748b' }]}>
-                中文翻译参考
-              </Text>
-              {bubble.translationStatus === 'translating' ? (
-                <View style={styles.translatingRow}>
-                  <ActivityIndicator size="small" color="#0284c7" />
-                  <Text style={[styles.translatingText, { color: '#0284c7' }]}>正在离线翻译…</Text>
+                {isTranslating ? (
+                  <View style={styles.statusRow}>
+                    <ActivityIndicator size="small" color="#0284c7" />
+                    <Text style={[styles.statusText, { color: '#0284c7' }]}>
+                      正在离线翻译…
+                    </Text>
+                  </View>
+                ) : isError ? (
+                  <Pressable
+                    style={styles.retryBtn}
+                    onPress={() => onRetryTranslate?.(bubble)}
+                    accessibilityRole="button"
+                    accessibilityLabel="重试翻译">
+                    <RefreshCw size={12} color="#ef4444" style={styles.retryIcon} />
+                    <Text style={[styles.retryBtnText, { color: '#ef4444' }]}>重试</Text>
+                  </Pressable>
+                ) : !hasTarget ? (
+                  <Pressable
+                    style={styles.retryBtn}
+                    onPress={() => onRetryTranslate?.(bubble)}
+                    accessibilityRole="button"
+                    accessibilityLabel="开始翻译">
+                    <RefreshCw size={12} color="#0284c7" style={styles.retryIcon} />
+                    <Text style={[styles.retryBtnText, { color: '#0284c7' }]}>翻译</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+
+              {hasTarget ? (
+                <View
+                  style={[
+                    styles.cardBox,
+                    styles.targetBox,
+                    {
+                      backgroundColor: isDark
+                        ? 'rgba(56, 189, 248, 0.12)'
+                        : 'rgba(2, 132, 199, 0.08)',
+                      borderColor: isDark ? '#0284c7' : '#38bdf8',
+                    },
+                  ]}>
+                  <Text
+                    style={[
+                      styles.targetText,
+                      { color: isDark ? '#f0f9ff' : '#0c4a6e' },
+                    ]}>
+                    {bubble.targetText}
+                  </Text>
                 </View>
-              ) : bubble.translationStatus === 'error' ? (
-                <Pressable
-                  style={styles.retryActionBtn}
-                  onPress={() => onRetryTranslate?.(bubble)}>
-                  <RefreshCw size={12} color="#ef4444" style={{ marginRight: 4 }} />
-                  <Text style={[styles.retryActionText, { color: '#ef4444' }]}>重试</Text>
-                </Pressable>
-              ) : !bubble.targetText && !bubble.isPlaceholder ? (
-                <Pressable
-                  style={styles.retryActionBtn}
-                  onPress={() => onRetryTranslate?.(bubble)}>
-                  <RefreshCw size={12} color="#0284c7" style={{ marginRight: 4 }} />
-                  <Text style={[styles.retryActionText, { color: '#0284c7' }]}>开始翻译</Text>
-                </Pressable>
-              ) : null}
+              ) : isTranslating ? (
+                <View
+                  style={[
+                    styles.cardBox,
+                    {
+                      backgroundColor: isDark ? '#27292d' : '#f8fafc',
+                      borderColor: isDark ? '#374151' : '#e2e8f0',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      paddingVertical: 18,
+                    },
+                  ]}>
+                  <ActivityIndicator size="small" color="#0284c7" />
+                  <Text
+                    style={{
+                      marginTop: 8,
+                      fontSize: 13,
+                      color: isDark ? '#94a3b8' : '#64748b',
+                    }}>
+                    正在离线翻译…
+                  </Text>
+                </View>
+              ) : isError ? (
+                <View
+                  style={[
+                    styles.cardBox,
+                    {
+                      backgroundColor: isDark
+                        ? 'rgba(239, 68, 68, 0.12)'
+                        : 'rgba(239, 68, 68, 0.06)',
+                      borderColor: '#ef4444',
+                    },
+                  ]}>
+                  <Text style={{ fontSize: 13, color: '#ef4444' }}>
+                    暂时无法完成翻译，请重试。若问题持续，请检查离线模型是否可用。
+                  </Text>
+                </View>
+              ) : (
+                <View
+                  style={[
+                    styles.cardBox,
+                    {
+                      backgroundColor: isDark ? '#27292d' : '#f8fafc',
+                      borderColor: isDark ? '#374151' : '#e2e8f0',
+                    },
+                  ]}>
+                  <Text style={{ fontSize: 13, color: isDark ? '#64748b' : '#94a3b8' }}>
+                    暂无中文译文，可点击右上角发起翻译
+                  </Text>
+                </View>
+              )}
             </View>
 
-            {bubble.targetText ? (
-              <View
-                style={[
-                  styles.textBox,
-                  styles.targetBox,
-                  {
-                    backgroundColor: isDark ? 'rgba(56, 189, 248, 0.12)' : 'rgba(2, 132, 199, 0.08)',
-                    borderColor: '#38bdf8',
-                  },
-                ]}>
-                <Text style={[styles.targetText, { color: isDark ? '#38bdf8' : '#0369a1' }]}>
-                  {bubble.targetText}
+            {/* Secondary Section: 原文次级 */}
+            <View style={[styles.section, { marginTop: 14 }]}>
+              <View style={styles.sectionHeader}>
+                <Text
+                  style={[
+                    styles.sectionLabel,
+                    { color: isDark ? '#94a3b8' : '#64748b' },
+                  ]}>
+                  日文原文
                 </Text>
               </View>
-            ) : bubble.translationStatus === 'translating' ? (
+
               <View
                 style={[
-                  styles.textBox,
+                  styles.cardBox,
                   {
                     backgroundColor: isDark ? '#27292d' : '#f8fafc',
                     borderColor: isDark ? '#374151' : '#e2e8f0',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    paddingVertical: 14,
                   },
                 ]}>
-                <ActivityIndicator size="small" color="#0284c7" />
-                <Text style={{ marginTop: 6, fontSize: 13, color: isDark ? '#94a3b8' : '#64748b' }}>
-                  正在离线翻译…
+                <Text
+                  style={[
+                    styles.sourceText,
+                    { color: isDark ? '#cbd5e1' : '#334155' },
+                  ]}>
+                  {bubble.sourceText || '未获取到文字内容'}
                 </Text>
               </View>
-            ) : bubble.translationStatus === 'error' ? (
-              <View
-                style={[
-                  styles.textBox,
-                  {
-                    backgroundColor: isDark ? 'rgba(239, 68, 68, 0.12)' : 'rgba(239, 68, 68, 0.06)',
-                    borderColor: '#ef4444',
-                  },
-                ]}>
-                <Text style={{ fontSize: 13, color: '#ef4444' }}>
-                  {bubble.translationError || '离线模型推理失败，可点击右上角重试'}
-                </Text>
-              </View>
-            ) : (
-              <View
-                style={[
-                  styles.textBox,
-                  {
-                    backgroundColor: isDark ? '#27292d' : '#f8fafc',
-                    borderColor: isDark ? '#374151' : '#e2e8f0',
-                  },
-                ]}>
-                <Text style={{ fontSize: 13, color: isDark ? '#64748b' : '#94a3b8' }}>
-                  {bubble.isPlaceholder ? '尚未识别到文字，请重新识别此区域。' : '未获取到中文译文。点击右上角【开始翻译】发起离线翻译。'}
-                </Text>
-              </View>
-            )}
-          </View>
-
-          {/* Notes / Tips */}
-          {bubble.notes ? (
-            <View style={styles.notesBox}>
-              <Text style={styles.notesText}>💡 {bubble.notes}</Text>
             </View>
-          ) : null}
+
+            {/* Optional Notes */}
+            {bubble.notes ? (
+              <View style={styles.notesBox}>
+                <Text style={styles.notesText}>{bubble.notes}</Text>
+              </View>
+            ) : null}
+          </ScrollView>
         </Pressable>
       </Pressable>
     </Modal>
@@ -244,108 +238,77 @@ export const BubbleDetailModal: React.FC<Props> = ({
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
     justifyContent: 'flex-end',
   },
   card: {
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    paddingTop: 12,
+    paddingHorizontal: 18,
+    maxHeight: '65%',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.15,
+    shadowOpacity: 0.18,
     shadowRadius: 10,
-    elevation: 8,
+    elevation: 12,
+  },
+  dragHandleContainer: {
+    width: '100%',
+    alignItems: 'center',
+    paddingVertical: 4,
+  },
+  dragHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(148, 163, 184, 0.2)',
+    marginBottom: 8,
   },
-  badgeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flexWrap: 'wrap',
-  },
-  orderBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
-  },
-  orderBadgeText: {
-    color: '#ffffff',
-    fontSize: 12,
+  headerTitle: {
+    fontSize: 16,
     fontWeight: '700',
-  },
-  typeBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 6,
-    borderWidth: 1,
-  },
-  typeBadgeText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  dirBadge: {
-    backgroundColor: 'rgba(100, 116, 139, 0.15)',
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 6,
-  },
-  dirBadgeText: {
-    color: '#64748b',
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  confidenceText: {
-    fontSize: 11,
-    color: '#94a3b8',
   },
   closeBtn: {
     padding: 4,
   },
+  scrollArea: {
+    flexGrow: 0,
+  },
+  scrollContent: {
+    paddingVertical: 6,
+  },
   section: {
-    marginTop: 10,
+    marginTop: 4,
   },
   sectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 6,
+    marginBottom: 8,
   },
   sectionLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.3,
   },
-  copyBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingVertical: 2,
-    paddingHorizontal: 6,
-    borderRadius: 4,
-  },
-  copyBtnText: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  translatingRow: {
+  statusRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
   },
-  translatingText: {
+  statusText: {
     fontSize: 12,
     fontWeight: '600',
   },
-  retryActionBtn: {
+  retryBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 3,
@@ -353,30 +316,33 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     backgroundColor: 'rgba(100, 116, 139, 0.12)',
   },
-  retryActionText: {
+  retryIcon: {
+    marginRight: 4,
+  },
+  retryBtnText: {
     fontSize: 12,
     fontWeight: '600',
   },
-  textBox: {
+  cardBox: {
     padding: 14,
     borderRadius: 12,
     borderWidth: 1,
-  },
-  sourceText: {
-    fontSize: 16,
-    lineHeight: 24,
-    fontWeight: '500',
   },
   targetBox: {
     borderWidth: 1.5,
   },
   targetText: {
-    fontSize: 16,
-    lineHeight: 24,
+    fontSize: 17,
+    lineHeight: 25,
     fontWeight: '600',
   },
+  sourceText: {
+    fontSize: 15,
+    lineHeight: 23,
+    fontWeight: '400',
+  },
   notesBox: {
-    marginTop: 14,
+    marginTop: 12,
     padding: 10,
     borderRadius: 8,
     backgroundColor: 'rgba(234, 179, 8, 0.1)',

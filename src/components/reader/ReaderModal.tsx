@@ -63,6 +63,10 @@ export function ReaderModal() {
   const retryVersionRef = useRef(0);
   const translationRuntimeRef = useRef<TranslationOrchestrator | null>(null);
   const translationAbortRef = useRef<AbortController | null>(null);
+  const pageStatus = useReaderStore((s) => s.translationPageStatus);
+  const pageErrorMessage = useReaderStore((s) => s.translationPageError);
+  const setPageStatus = useReaderStore((s) => s.setTranslationPageStatus);
+  const setPageErrorMessage = useReaderStore((s) => s.setTranslationPageError);
   const [base64Content, setBase64Content] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -231,11 +235,14 @@ export function ReaderModal() {
         // 翻页到达新页面时，立即将旧页面的气泡识别状态与图层全部中止并清空
         if (!isNaN(newPage) && newPage !== prevPage) {
           translationAbortRef.current?.abort();
+          retryVersionRef.current++;
           activeRequestIdRef.current = ++nextReqIdRef.current;
           inFlightRequestRef.current = false;
           setIsDetectingBubbles(false);
           setDetectedBubbles([]);
           setSelectedBubble(null);
+          setPageStatus(isBubbleDetectActive ? 'loading' : 'idle');
+          setPageErrorMessage(undefined);
         }
         break;
       }
@@ -243,11 +250,14 @@ export function ReaderModal() {
       case 'cancelBubbleDetection': {
         // WebView 触发翻页动作时发出的即时中止信号
         translationAbortRef.current?.abort();
+        retryVersionRef.current++;
         activeRequestIdRef.current = ++nextReqIdRef.current;
         inFlightRequestRef.current = false;
         setIsDetectingBubbles(false);
         setDetectedBubbles([]);
         setSelectedBubble(null);
+        setPageStatus(isBubbleDetectActive ? 'loading' : 'idle');
+        setPageErrorMessage(undefined);
         break;
       }
 
@@ -267,6 +277,18 @@ export function ReaderModal() {
         const currentStorePage = useReaderStore.getState().currentPage;
         const targetPage = data.pageNum || currentStorePage || 1;
         const snapshotLen = data.snapshot ? data.snapshot.length : 0;
+        const requestBookId = String(currentBook?.id ?? '');
+        const isCurrentRequest = () => {
+          const state = useReaderStore.getState();
+          return state.isOpen && state.isBubbleDetectActive &&
+            String(state.currentBook?.id ?? '') === requestBookId &&
+            state.currentPage === targetPage && activeRequestIdRef.current === reqId;
+        };
+
+        if (!useReaderStore.getState().isOpen || !useReaderStore.getState().isBubbleDetectActive) {
+          webViewRef.current?.postMessage('detectionFailed', { requestId: reqId, pageNum: targetPage, reason: 'cancelled' });
+          break;
+        }
 
         // 若请求对应的页码已被翻过（目标页不等于当前激活页），坚决不启动耗时的底层 OCR
         if (targetPage !== currentStorePage) {
@@ -283,6 +305,8 @@ export function ReaderModal() {
         activeRequestIdRef.current = reqId;
         inFlightRequestRef.current = true;
         setIsDetectingBubbles(true);
+        setPageStatus('loading');
+        setPageErrorMessage(undefined);
         // 新一页开始检测时，清空之前页面的残留气泡
         setDetectedBubbles([]);
         setSelectedBubble(null);
@@ -295,7 +319,7 @@ export function ReaderModal() {
             const latestPage = useReaderStore.getState().currentPage;
             // 时序与页码版本严格防护：
             // 若用户在 OCR 运行期间翻页或触发了新请求，旧请求的结果坚决不覆盖当前页面
-            if (activeRequestIdRef.current !== reqId || latestPage !== targetPage) {
+            if (!isCurrentRequest()) {
               console.warn(`[BubbleOCR] [ERROR_OR_CANCEL] Stale request result ignored: reqId=${reqId}, currentActive=${activeRequestIdRef.current}, reqPage=${targetPage}, latestPage=${latestPage}`);
               webViewRef.current?.postMessage('detectionFailed', {
                 reason: 'stale',
@@ -316,10 +340,12 @@ export function ReaderModal() {
                 pageNum: targetPage,
               });
               ackSent = true;
+              setPageStatus('loading');
               triggerPageTranslation(targetPage, reqId, bubbles);
             } else {
               // 成功但结果为空（合法 0 气泡）：明确清空 overlay，发送 detectionCompleted ACK 释放 WebView 锁
               setDetectedBubbles([]);
+              setPageStatus('zero_text');
               webViewRef.current?.postMessage('detectionCompleted', {
                 bubbles: [],
                 active: true,
@@ -331,6 +357,10 @@ export function ReaderModal() {
           })
           .catch((err) => {
             console.error(`[BubbleOCR] [ERROR_OR_CANCEL] detectBubblesForPage error (reqId=${reqId}):`, err);
+            if (isCurrentRequest()) {
+              setPageStatus('error');
+              setPageErrorMessage('暂时无法识别本页，请重试');
+            }
             webViewRef.current?.postMessage('detectionFailed', {
               reason: err?.message || 'detection_error',
               requestId: reqId,
@@ -356,9 +386,9 @@ export function ReaderModal() {
       }
 
       case 'bubblePressed':
-        if (data.bubble) {
+        if (data.bubble && useReaderStore.getState().isBubbleDetectActive) {
           const currentBubble = useReaderStore.getState().detectedBubbles.find((bubble) => bubble.id === data.bubble.id);
-          setSelectedBubble(currentBubble || data.bubble);
+          if (currentBubble) setSelectedBubble(currentBubble);
         }
         break;
 
@@ -380,7 +410,10 @@ export function ReaderModal() {
       translationAbortRef.current = abortController;
 
       const validBubbles = bubbles.filter((b) => !b.isPlaceholder && b.sourceText && b.sourceText.trim().length > 0);
-      if (validBubbles.length === 0) return;
+      if (validBubbles.length === 0) {
+        setPageStatus('zero_text');
+        return;
+      }
 
       const initialTranslating = bubbles.map((b) =>
         !b.isPlaceholder && b.sourceText && b.sourceText.trim().length > 0
@@ -423,6 +456,7 @@ export function ReaderModal() {
           const latestPage = latestState.currentPage;
           if (
             !latestState.isOpen ||
+            !latestState.isBubbleDetectActive ||
             String(latestState.currentBook?.id ?? '') !== String(currentBook?.id ?? '') ||
             abortController.signal.aborted ||
             activeRequestIdRef.current !== reqId ||
@@ -446,6 +480,9 @@ export function ReaderModal() {
           });
 
           setDetectedBubbles(updatedBubbles);
+          const hasMissingTranslation = updatedBubbles.some((b) => !b.isPlaceholder && b.sourceText?.trim() && !b.targetText?.trim());
+          setPageStatus(hasMissingTranslation ? 'error' : 'completed');
+          setPageErrorMessage(hasMissingTranslation ? '部分文字未能翻译，请重试' : undefined);
 
           const curSelected = useReaderStore.getState().selectedBubble;
           if (curSelected && transMap.has(curSelected.id)) {
@@ -470,6 +507,7 @@ export function ReaderModal() {
           const latestPage = latestState.currentPage;
           if (
             !latestState.isOpen ||
+            !latestState.isBubbleDetectActive ||
             String(latestState.currentBook?.id ?? '') !== String(currentBook?.id ?? '') ||
             abortController.signal.aborted ||
             activeRequestIdRef.current !== reqId ||
@@ -478,6 +516,8 @@ export function ReaderModal() {
             return;
           }
           console.warn('[ReaderModal] 端侧离线翻译未完成:', err);
+          setPageStatus('error');
+          setPageErrorMessage('离线翻译遇到问题');
           const errorBubbles = useReaderStore.getState().detectedBubbles.map((b) => {
             if (!b.isPlaceholder && b.sourceText && b.sourceText.trim()) {
               return {
@@ -500,12 +540,12 @@ export function ReaderModal() {
           }
         });
     },
-    [currentBook, setDetectedBubbles, setSelectedBubble]
+    [currentBook, setDetectedBubbles, setSelectedBubble, setPageStatus, setPageErrorMessage]
   );
 
   const handleRetryTranslateBubble = useCallback(
     async (bubble: TextBubble) => {
-      if (!bubble || bubble.isPlaceholder || !bubble.sourceText.trim() || bubble.translationStatus === 'translating') return;
+      if (!useReaderStore.getState().isBubbleDetectActive || !bubble || bubble.isPlaceholder || !bubble.sourceText.trim() || bubble.translationStatus === 'translating') return;
 
       const capturedPage = useReaderStore.getState().currentPage;
       const capturedBookId = currentBook ? String(currentBook.id) : '';
@@ -537,6 +577,7 @@ export function ReaderModal() {
         const currentActiveBookId = storeState.currentBook ? String(storeState.currentBook.id) : '';
         if (
           !storeState.isOpen ||
+          !storeState.isBubbleDetectActive ||
           thisRetryVersion !== retryVersionRef.current ||
           activeRequestIdRef.current !== capturedReqId ||
           storeState.currentPage !== capturedPage ||
@@ -559,9 +600,14 @@ export function ReaderModal() {
           b.id === capturedBubbleId ? translatedBubble : b
         );
         setDetectedBubbles(nextBubbles);
+        if (nextBubbles.every((b) => b.isPlaceholder || !b.sourceText?.trim() || b.targetText?.trim())) {
+          setPageStatus('completed');
+          setPageErrorMessage(undefined);
+        }
         webViewRef.current?.postMessage('setDetectedBubbles', {
           bubbles: nextBubbles,
           active: true,
+          requestId: capturedReqId,
           pageNum: capturedPage,
         });
       } catch (err: any) {
@@ -569,6 +615,7 @@ export function ReaderModal() {
         const currentActiveBookId = storeState.currentBook ? String(storeState.currentBook.id) : '';
         if (
           !storeState.isOpen ||
+          !storeState.isBubbleDetectActive ||
           thisRetryVersion !== retryVersionRef.current ||
           activeRequestIdRef.current !== capturedReqId ||
           storeState.currentPage !== capturedPage ||
@@ -593,7 +640,7 @@ export function ReaderModal() {
         );
       }
     },
-    [currentBook, setDetectedBubbles, setSelectedBubble]
+    [currentBook, setDetectedBubbles, setSelectedBubble, setPageStatus, setPageErrorMessage]
   );
 
   const cancelTranslations = useCallback(() => {
@@ -615,42 +662,45 @@ export function ReaderModal() {
   useEffect(() => {
     if (isPdf && webViewRef.current) {
       const reqId = ++nextReqIdRef.current;
+      if (!isBubbleDetectActive) {
+        cancelTranslations();
+        inFlightRequestRef.current = false;
+        setIsDetectingBubbles(false);
+        setDetectedBubbles([]);
+        setSelectedBubble(null);
+        setPageStatus('idle');
+        setPageErrorMessage(undefined);
+      } else {
+        setPageStatus('loading');
+        setPageErrorMessage(undefined);
+      }
       webViewRef.current.postMessage('toggleBubbleDetection', {
         active: isBubbleDetectActive,
         requestId: reqId,
       });
     }
-  }, [isBubbleDetectActive, isPdf]);
+  }, [isBubbleDetectActive, isPdf, cancelTranslations, setIsDetectingBubbles, setDetectedBubbles, setSelectedBubble, setPageStatus, setPageErrorMessage]);
 
-  const handleToggleBubbleDetect = () => {
-    const nextActive = !isBubbleDetectActive;
-    console.log(`[BubbleOCR] [JS_CLICK_ENTRY] handleToggleBubbleDetect clicked, nextActive=${nextActive}, isPdf=${isPdf}`);
-    if (!nextActive) {
-      translationAbortRef.current?.abort();
-      activeRequestIdRef.current = ++nextReqIdRef.current;
-      inFlightRequestRef.current = false;
-      setIsDetectingBubbles(false);
-      setDetectedBubbles([]);
-      setSelectedBubble(null);
-    }
-    toggleBubbleDetection(nextActive);
-  };
+  const handleToggleBubbleDetect = useCallback(() => {
+    toggleBubbleDetection(!isBubbleDetectActive);
+  }, [isBubbleDetectActive, toggleBubbleDetection]);
 
-  const handleRefreshBubbleDetect = () => {
-    console.log(`[BubbleOCR] [JS_CLICK_ENTRY] handleRefreshBubbleDetect clicked, isPdf=${isPdf}`);
+  const handleRefreshBubbleDetect = useCallback(() => {
     if (isPdf && webViewRef.current) {
-      translationAbortRef.current?.abort();
+      cancelTranslations();
       const reqId = ++nextReqIdRef.current;
       activeRequestIdRef.current = reqId;
       inFlightRequestRef.current = false;
       setIsDetectingBubbles(true);
+      setPageStatus('loading');
+      setPageErrorMessage(undefined);
       setDetectedBubbles([]);
       setSelectedBubble(null);
       webViewRef.current.postMessage('runBubbleDetection', {
         requestId: reqId,
       });
     }
-  };
+  }, [isPdf, cancelTranslations, setIsDetectingBubbles, setDetectedBubbles, setSelectedBubble, setPageStatus, setPageErrorMessage]);
 
   // Actions passed to UI controls
   const handlePrevChapter = () => {
@@ -745,11 +795,14 @@ export function ReaderModal() {
         {/* Subtle Footer: Battery & Time on Left, Page Count on Right (NeatReader Style) */}
         {!isBarsVisible && !error ? <ReaderFooterBar /> : null}
 
-        {/* 漫画气泡检测快速悬浮胶囊 (1键开启/关闭/状态展示，阅读无阻碍) */}
+        {/* 仅在翻译开启期间显示的轻量状态组件 */}
         {isPdf && !error ? (
           <BubbleFloatingPill
             onToggle={handleToggleBubbleDetect}
             onRefresh={handleRefreshBubbleDetect}
+            pageStatus={pageStatus}
+            errorMessage={pageErrorMessage}
+            onDismiss={() => setPageStatus('completed')}
           />
         ) : null}
 

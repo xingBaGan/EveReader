@@ -7,8 +7,11 @@ import {
   SearchMatchItem,
 } from '../types/reader';
 import { TextBubble } from '../types/manga';
+
 import { saveJsonFile, loadJsonFile } from '../utils/fileStorage';
 import { useBookshelfStore } from './useBookshelfStore';
+
+export type TranslationPageStatus = 'idle' | 'loading' | 'completed' | 'zero_text' | 'error';
 
 const READER_SETTINGS_FILE = 'reader_settings_v1.json';
 const BOOKMARKS_STORAGE_FILE = 'reader_bookmarks_v1.json';
@@ -32,6 +35,8 @@ interface ReaderStoreState {
   isDetectingBubbles: boolean;
   detectedBubbles: TextBubble[];
   selectedBubble: TextBubble | null;
+  translationPageStatus: TranslationPageStatus;
+  translationPageError?: string;
 
   // UI Drawer / Overlay controls
   isBarsVisible: boolean;
@@ -70,6 +75,8 @@ interface ReaderStoreState {
   setIsDetectingBubbles: (detecting: boolean) => void;
   setDetectedBubbles: (bubbles: TextBubble[]) => void;
   setSelectedBubble: (bubble: TextBubble | null) => void;
+  setTranslationPageStatus: (status: TranslationPageStatus) => void;
+  setTranslationPageError: (message?: string) => void;
 }
 
 const DEFAULT_SETTINGS: ReaderSettings = {
@@ -98,6 +105,8 @@ export const useReaderStore = create<ReaderStoreState>((set, get) => ({
   isDetectingBubbles: false,
   detectedBubbles: [],
   selectedBubble: null,
+  translationPageStatus: 'idle',
+  translationPageError: undefined,
 
   isBarsVisible: false,
   isTocOpen: false,
@@ -124,6 +133,12 @@ export const useReaderStore = create<ReaderStoreState>((set, get) => ({
     const parsedPage = book.currentLocation ? parseInt(book.currentLocation, 10) : 1;
     set({
       isOpen: true,
+      isBubbleDetectActive: false,
+      translationPageStatus: 'idle',
+      translationPageError: undefined,
+      isDetectingBubbles: false,
+      detectedBubbles: [],
+      selectedBubble: null,
       currentBook: book,
       currentCfi: book.currentLocation || '',
       currentProgress: book.progress || 0,
@@ -154,6 +169,12 @@ export const useReaderStore = create<ReaderStoreState>((set, get) => ({
     }
     set({
       isOpen: false,
+      isBubbleDetectActive: false,
+      translationPageStatus: 'idle',
+      translationPageError: undefined,
+      isDetectingBubbles: false,
+      detectedBubbles: [],
+      selectedBubble: null,
       currentBook: null,
       isBarsVisible: false,
       isTocOpen: false,
@@ -233,6 +254,8 @@ export const useReaderStore = create<ReaderStoreState>((set, get) => ({
       const nextActive = active !== undefined ? active : !state.isBubbleDetectActive;
       return {
         isBubbleDetectActive: nextActive,
+        translationPageStatus: nextActive ? 'loading' : 'idle',
+        translationPageError: undefined,
         // If turned off, clear detected bubbles
         ...(nextActive ? {} : { detectedBubbles: [], selectedBubble: null }),
       };
@@ -244,4 +267,6 @@ export const useReaderStore = create<ReaderStoreState>((set, get) => ({
   setDetectedBubbles: (bubbles) => set({ detectedBubbles: bubbles }),
 
   setSelectedBubble: (bubble) => set({ selectedBubble: bubble }),
+  setTranslationPageStatus: (status) => set({ translationPageStatus: status }),
+  setTranslationPageError: (message) => set({ translationPageError: message }),
 }));
