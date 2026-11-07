@@ -1140,7 +1140,8 @@ object MangaOcrProcessor {
     sourceBitmap: Bitmap,
     regionRect: Rect,
     preferredLang: String = "auto",
-    screenHasJapanese: Boolean = true
+    screenHasJapanese: Boolean = true,
+    trimPaddingNoise: Boolean = false
   ): Map<String, Any>? {
     val srcW = sourceBitmap.width
     val srcH = sourceBitmap.height
@@ -1169,7 +1170,15 @@ object MangaOcrProcessor {
 
       // 0. 优先调用漫画端侧专用 CharSpot 模型 (CharSpot-Small: 单次前向+原生阅读顺序+字符级坐标)
       if (MangaOcrModel.isModelReady) {
-        val ocrRes = MangaOcrModel.recognizeDetail(cropBmp)
+        val rawResult = MangaOcrModel.recognizeDetail(cropBmp)
+        val acceptedChars = if (trimPaddingNoise) rawResult.chars.filter { c ->
+          c.score >= 0.80f || regionRect.contains(
+            (c.box.centerX() + cropLeft).toInt(), (c.box.centerY() + cropTop).toInt())
+        } else rawResult.chars
+        val ocrRes = if (acceptedChars.size == rawResult.chars.size) rawResult else {
+          MangaOcrModel.OcrResult(acceptedChars.joinToString("") { it.char }, acceptedChars,
+            if (acceptedChars.isEmpty()) 0f else acceptedChars.map { it.score }.average().toFloat())
+        }
         if (ocrRes.text.isNotBlank() && !isJunkNoiseLine(ocrRes.text, regionRect)) {
           val disambiguated = disambiguateMangaCharacters(ocrRes.text)
           val isVertical = inferCharSpotDirection(ocrRes.chars, regionRect)
@@ -1580,9 +1589,11 @@ object MangaOcrProcessor {
     var nextId = 1000
 
     val textDetections = detections.filter { it.category == 1 || it.category == 2 }
+    val preciseRegions = mutableSetOf<Rect>()
     // 宽桥接检测框先拆成每个分离气泡列的子检测，避免其跨列 tightBox 回写单个气泡
     val expandedDetections = textDetections.flatMap { det ->
       val charRegions = charSeparatedRegions(sourceBitmap, det.bounds)
+      if (charRegions.size >= 2) preciseRegions.addAll(charRegions)
       val subRegions = if (charRegions.size >= 2) charRegions else bridgeSubRegions(det.bounds, resultList)
       if (subRegions.size >= 2) {
         subRegions.map { region ->
@@ -1645,7 +1656,8 @@ object MangaOcrProcessor {
             sourceBitmap = sourceBitmap,
             regionRect = dRect,
             preferredLang = preferredLang,
-            screenHasJapanese = true
+            screenHasJapanese = true,
+            trimPaddingNoise = dRect in preciseRegions
           )
           if (enhanced != null) {
             val enhancedText = enhanced["sourceText"] as? String ?: ""
@@ -1716,7 +1728,8 @@ object MangaOcrProcessor {
           sourceBitmap = sourceBitmap,
           regionRect = dRect,
           preferredLang = preferredLang,
-          screenHasJapanese = true
+          screenHasJapanese = true,
+          trimPaddingNoise = dRect in preciseRegions
         )
 
         val recognizedText = targetEnhancement?.get("sourceText") as? String ?: ""
