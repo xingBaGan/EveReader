@@ -33,7 +33,8 @@ import kotlin.math.min
  * 1. 基于 ONNX Runtime 跨平台高性能张量计算库
  * 2. 真实加载 JMangaTranslator-Fast v1 离线翻译包 (Fast int8 / Fast mixed)
  * 3. ModernBERT-ja Unigram 分词 + Encoder 交叉注意力投影 + Decoder 自回归单步推理 + SentencePiece 中文反分词
- * 4. 0 网络请求、0 隐私泄露、完全离线毫秒级推理
+ * 推理契约参考 muscgab/JMangaTranslator-Fast 的 jmt_fast/common.py (MIT)。
+ * 4. 翻译推理完全在本地执行
  */
 object OnnxTranslator {
 
@@ -448,7 +449,6 @@ object OnnxTranslator {
           longArrayOf(1, H.toLong(), M.toLong(), hd.toLong())
         )
       }
-      encOutputs.close()
 
       // 4. 构建 cmask 张量 [1, 1, 1, M]
       val cmaskBuf = ByteBuffer.allocateDirect(M * 4)
@@ -504,33 +504,32 @@ object OnnxTranslator {
         }
         xDirectBuf.position(0)
 
-        val xTensor = OnnxTensor.createTensor(env, xDirectBuf, longArrayOf(1, 1, dim.toLong()))
-        smaskBuf.position(0)
-        val smaskTensor = OnnxTensor.createTensor(env, smaskBuf, longArrayOf(1, 1, 1, T.toLong()))
-
-        val cacheTensors = HashMap<String, OnnxTensor>()
-        for (cName in cacheNames) {
-          cacheBuffers[cName]!!.position(0)
-          cacheTensors[cName] = OnnxTensor.createTensor(
-            env,
-            cacheBuffers[cName]!!,
-            longArrayOf(1, H.toLong(), T.toLong(), hd.toLong())
-          )
-        }
-
-        val stepInputs = HashMap<String, OnnxTensor>()
-        stepInputs["x"] = xTensor
-        stepInputs["smask"] = smaskTensor
-        stepInputs["cmask"] = cmaskTensor
-        for ((k, tensor) in crossTensors) stepInputs[k] = tensor
-        for ((k, tensor) in cacheTensors) stepInputs[k] = tensor
-
+        val stepTensors = mutableListOf<OnnxTensor>()
         val decOutputs = try {
+          val xTensor = OnnxTensor.createTensor(env, xDirectBuf, longArrayOf(1, 1, dim.toLong())).also { stepTensors.add(it) }
+          smaskBuf.position(0)
+          val smaskTensor = OnnxTensor.createTensor(env, smaskBuf, longArrayOf(1, 1, 1, T.toLong())).also { stepTensors.add(it) }
+
+          val cacheTensors = HashMap<String, OnnxTensor>()
+          for (cName in cacheNames) {
+            cacheBuffers[cName]!!.position(0)
+            cacheTensors[cName] = OnnxTensor.createTensor(
+              env,
+              cacheBuffers[cName]!!,
+              longArrayOf(1, H.toLong(), T.toLong(), hd.toLong())
+            ).also { stepTensors.add(it) }
+          }
+
+          val stepInputs = HashMap<String, OnnxTensor>()
+          stepInputs["x"] = xTensor
+          stepInputs["smask"] = smaskTensor
+          stepInputs["cmask"] = cmaskTensor
+          for ((k, tensor) in crossTensors) stepInputs[k] = tensor
+          for ((k, tensor) in cacheTensors) stepInputs[k] = tensor
+
           decoderSession.run(stepInputs)
         } finally {
-          xTensor.close()
-          smaskTensor.close()
-          for (tns in cacheTensors.values) tns.close()
+          for (tensor in stepTensors) tensor.close()
         }
 
         val nxtToken = try {
